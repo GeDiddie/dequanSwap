@@ -1,0 +1,170 @@
+.app {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 18px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+@media (max-width: 860px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 14px;
+}
+
+.panelTitle {
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.row {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+input[type='text'],
+input:not([type]) {
+  width: 100%;
+}
+
+input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text);
+  outline: none;
+}
+
+input:focus {
+  border-color: var(--accent);
+}
+
+.inline {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.inline > input {
+  flex: 1;
+}
+
+.quick {
+  display: flex;
+  gap: 6px;
+}
+
+.pill {
+  min-width: 86px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.ctaRow {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+button {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0f14;
+  font-weight: 700;
+}
+
+.secondary {
+  background: #131a24;
+}
+
+.ghost {
+  background: transparent;
+}
+
+.status {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.statusLine {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 92, 92, 0.3);
+  background: rgba(255, 92, 92, 0.08);
+  color: #ffb6b6;
+}
+
+.note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
