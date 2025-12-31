@@ -56,6 +56,33 @@ body::before {
   100% { box-shadow: 0 0 5px var(--pulse-color), inset 0 0 10px var(--pulse-color); }
 }
 
+/* Glitch Pulse for Snipe Panel */
+@keyframes glitch-pulse {
+  0%, 100% { 
+    box-shadow: 0 0 10px var(--neon-green);
+    transform: scale(1);
+  }
+  50% { 
+    box-shadow: 0 0 25px var(--neon-green), inset 0 0 15px rgba(0,255,127,0.3);
+    transform: scale(1.02);
+  }
+}
+
+.animate-glitch-pulse {
+  animation: glitch-pulse 0.5s ease-in-out;
+}
+
+/* Radar Sweep for Empty State */
+@keyframes radar-sweep {
+  0% { transform: rotate(0deg); opacity: 0.3; }
+  50% { opacity: 0.6; }
+  100% { transform: rotate(360deg); opacity: 0.3; }
+}
+
+.radar-sweep {
+  animation: radar-sweep 3s linear infinite;
+}
+
 .topbar {
   display: flex;
   align-items: center;

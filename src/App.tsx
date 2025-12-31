@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConnection, useWallet } from '@solana/wallet-adapter-react'
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
 import { PublicKey } from '@solana/web3.js'
+import { AnimatePresence } from 'framer-motion'
+import { TokenRow } from './components/TokenRow'
 import { TradingWs } from './lib/tradingWs'
 import {
   type ProductTier,
@@ -22,8 +24,6 @@ import {
   computePriceProxyScaled,
   loadPaperState,
   newTradeId,
-  positionPnlPct,
-  positionValueLamports,
   savePaperState,
   type PaperPosition,
   type PaperState,
@@ -139,16 +139,17 @@ function parseWatchedTokens(raw: string | null): WatchedToken[] {
   }
 }
 
-function formatAge(ms: number) {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  const rs = s % 60
-  if (m < 60) return `${m}m ${rs}s`
-  const h = Math.floor(m / 60)
-  const rm = m % 60
-  return `${h}h ${rm}m`
-}
+// Moved to TokenRow component - kept here for potential future use
+// function formatAge(ms: number) {
+//   const s = Math.max(0, Math.floor(ms / 1000))
+//   if (s < 60) return `${s}s`
+//   const m = Math.floor(s / 60)
+//   const rs = s % 60
+//   if (m < 60) return `${m}m ${rs}s`
+//   const h = Math.floor(m / 60)
+//   const rm = m % 60
+//   return `${h}h ${rm}m`
+// }
 
 type DequanwFeedResponse = {
   generatedAt: number
@@ -222,12 +223,12 @@ function App() {
   const [feed, setFeed] = useState<FeedToken[]>([])
   const [feedError, setFeedError] = useState<string>('')
 
-  const [growthTriggerPct, setGrowthTriggerPct] = useState(() => {
+  const [growthTriggerPct] = useState(() => {
     const raw = loadSetting('dequanswap.growthTriggerPct', '20')
     const n = Number(raw)
     return Number.isFinite(n) ? n : 20
   })
-  const [triggeredCount, setTriggeredCount] = useState(0)
+  const [, setTriggeredCount] = useState(0)
   const triggeredSetRef = useRef<Set<string>>(new Set())
 
   const [paper, setPaper] = useState<PaperState>(() => loadPaperState())
@@ -978,207 +979,66 @@ function App() {
       </div>
 
       {uiMode === 'minimalist' ? (
-        <main className="gridSnipe">
-          <section className="panel">
+        <main style={{ display: 'flex', gap: '16px', marginTop: '16px', alignItems: 'start' }}>
+          {/* LEFT 65%: THE WATERFALL (Kinetic Vertical Stream) */}
+          <section className="panel" style={{ flex: '0 0 65%', maxHeight: 'calc(100vh - 200px)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             <div className="panelHead">
               <div className="panelTitle">Live Feed</div>
-              <div className="panelHint">Auto-refreshing tokens from dequanW strategy</div>
+              <div className="panelHint">Auto-refreshing kinetic stream from dequanW</div>
             </div>
 
             {feedError ? <div className="error" style={{ marginBottom: '12px' }}>Feed: {feedError}</div> : null}
 
-            <div className="tokenGrid">
-              {feed.slice(0, 12).map((t) => {
-                // Dynamic heat mapping based on growth %
-                const growth = t.growthPct ?? 0
-                const heatClass = growth < 10 ? 'token-card-cool' : growth > 50 ? 'token-card-hot' : growth > 25 ? 'token-card-warm' : ''
-                
-                return (
-                  <div key={t.mint} className={`tokenCard ${heatClass}`}>
-                    <div className="tokenTop">
-                      <div className="tokenName">{t.name || shortPk(t.mint)}{t.symbol ? <span className="tokenSym">({t.symbol})</span> : null}</div>
-                      <div className={t.growthPct !== undefined && t.growthPct > 0 ? 'pos' : t.growthPct !== undefined && t.growthPct < 0 ? 'neg' : 'muted'}>
-                        {t.growthPct === undefined ? '—' : `${t.growthPct.toFixed(2)}%`}
-                      </div>
-                    </div>
-                    <div className="tokenMeta">
-                      <span className="muted mono">{shortPk(t.mint)}</span>
-                      <span className="muted">{t.startedAt ? `${formatAge(Date.now() - t.startedAt)} ago` : ''}</span>
-                      <span className="muted">{t.detectedMc ? `$${Math.round(t.detectedMc).toLocaleString()}` : ''}</span>
-                    </div>
-                    <div className="tokenActions">
-                      <button
-                        className="ghost"
-                        onClick={() => {
-                          setTokenMint(t.mint)
-                          void refreshBalances()
-                        }}
-                      >
-                        Load
-                      </button>
-                      <button className="ghost" onClick={() => watchMint(t.mint)}>
-                        Watch
-                      </button>
-                      <button
-                        className="primary"
-                        disabled={step !== 'idle'}
-                        onClick={() => {
-                          setTokenMint(t.mint)
-                          // Add snipe trigger animation to main container
-                          const mainContainer = document.querySelector('.gridSnipe')
-                          mainContainer?.classList.add('snipe-trigger')
-                          setTimeout(() => mainContainer?.classList.remove('snipe-trigger'), 200)
-                          void buy()
-                        }}
-                      >
-                        Snipe
-                      </button>
-                    </div>
-                    {t.error ? <div className="note">Quote: {t.error}</div> : null}
-                  </div>
-                )
-              })}
-              {!feed.length ? <div className="muted">No live tokens yet (feed empty).</div> : null}
-            </div>
+            {/* THE STREAM CONTAINER */}
+            <div style={{ flex: 1, overflow: 'auto', paddingRight: '4px' }}>
+              <AnimatePresence mode="popLayout">
+                {feed.slice(0, 20).map((t) => (
+                  <TokenRow
+                    key={t.mint}
+                    token={t}
+                    onLoad={(mint) => {
+                      setTokenMint(mint)
+                      void refreshBalances()
+                    }}
+                    onWatch={watchMint}
+                    onSnipe={(mint) => {
+                      setTokenMint(mint)
+                      // Trigger snipe panel pulse
+                      const panel = document.getElementById('snipe-panel')
+                      panel?.classList.add('animate-glitch-pulse')
+                      setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
+                      void buy()
+                    }}
+                    disabled={step !== 'idle'}
+                  />
+                ))}
+              </AnimatePresence>
 
-            <div className="row">
-              <label>Trigger</label>
-              <div className="inline">
-                <input
-                  value={String(growthTriggerPct)}
-                  onChange={(e) => setGrowthTriggerPct(Number(e.target.value))}
-                  inputMode="decimal"
-                  placeholder="20"
-                />
-                <div className="pill">Triggered: {triggeredCount}</div>
-                <div className="quick">
-                  <button className={growthTriggerPct === 20 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setGrowthTriggerPct(20)}>
-                    20%
-                  </button>
-                  <button className={growthTriggerPct === 40 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setGrowthTriggerPct(40)}>
-                    40%
-                  </button>
-                  <button className={growthTriggerPct === 80 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setGrowthTriggerPct(80)}>
-                    80%
-                  </button>
+              {/* EMPTY STATE */}
+              {!feed.length ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '300px', opacity: 0.6 }}>
+                  <div className="radar-sweep" style={{ width: '60px', height: '60px', borderRadius: '50%', border: '2px solid var(--neon-green)', marginBottom: '16px' }} />
+                  <div style={{ fontSize: '14px', color: 'var(--muted)' }}>Scanning for Signals...</div>
                 </div>
-              </div>
-              <div className="note">Highlights tokens over the trigger (session counter).</div>
-            </div>
-
-            <div className="row">
-              <label>Add token</label>
-              <div className="inline">
-                <input
-                  value={watchMintInput}
-                  onChange={(e) => setWatchMintInput(e.target.value)}
-                  placeholder="Paste token mint…"
-                  spellCheck={false}
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                />
-                <button className="primary" onClick={addWatchedToken} disabled={step !== 'idle'}>
-                  Watch
-                </button>
-              </div>
-              <div className="note">
-                Uses swap quotes as a price proxy. Tier limit: {watched.length}/{gates.maxWatchedTokens}. Poll: {Math.round(
-                  gates.quotePollMs / 1000,
-                )}
-                s.
-              </div>
-            </div>
-
-            <div className="tableWrap">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Token</th>
-                    <th>Age</th>
-                    <th>Growth</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {watched.map((t) => (
-                    <tr key={t.mint} className={t.growthPct !== undefined && t.growthPct >= growthTriggerPct ? 'rowHot' : ''}>
-                      <td className="mono">{shortPk(t.mint)}</td>
-                      <td className="muted">{formatAge(Date.now() - t.addedAt)}</td>
-                      <td className={t.growthPct && t.growthPct > 0 ? 'pos' : t.growthPct && t.growthPct < 0 ? 'neg' : ''}>
-                        {t.growthPct === undefined ? '—' : `${t.growthPct.toFixed(2)}%`}
-                        {t.growthPct !== undefined && t.growthPct >= growthTriggerPct ? <span className="badge">ALERT</span> : null}
-                      </td>
-                      <td className="muted">
-                        {t.error
-                          ? `Error: ${t.error}`
-                          : t.lastUpdatedAt
-                            ? `Updated ${formatAge(Date.now() - t.lastUpdatedAt)} ago`
-                            : 'Waiting…'}
-                      </td>
-                      <td>
-                        <div className="tableBtns">
-                          <button
-                            className="ghost"
-                            onClick={() => {
-                              setTokenMint(t.mint)
-                              void refreshBalances()
-                            }}
-                          >
-                            Load
-                          </button>
-                          <button
-                            className="primary"
-                            disabled={!canTrade || step !== 'idle'}
-                            onClick={() => {
-                              setTokenMint(t.mint)
-                              void buy()
-                            }}
-                          >
-                            Buy
-                          </button>
-                          <button
-                            className="secondary"
-                            disabled={!canTrade || step !== 'idle'}
-                            onClick={() => {
-                              setTokenMint(t.mint)
-                              void sellPercent(100)
-                            }}
-                          >
-                            Sell
-                          </button>
-                          <button className="ghost" onClick={() => removeWatchedToken(t.mint)}>
-                            Remove
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {!watched.length ? (
-                    <tr>
-                      <td colSpan={5} className="muted">
-                        Add a token mint to start tracking growth.
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
+              ) : null}
             </div>
           </section>
 
-          <aside className="sideStack">
-            <section className="panel">
+          {/* RIGHT 35%: THE COMMAND CENTER (Fixed Sidebar) */}
+          <aside style={{ flex: '0 0 35%', position: 'sticky', top: '100px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {/* SNIPE PANEL */}
+            <section id="snipe-panel" className="panel">
               <div className="panelHead">
                 <div className="panelTitle">Snipe</div>
-                <div className="panelHint">Pick token, size, slippage, fire</div>
+                <div className="panelHint">Quick execution</div>
               </div>
 
               <div className="row">
-                <label>Token</label>
+                <label>Token Mint</label>
                 <input
                   value={tokenMint}
                   onChange={(e) => setTokenMint(e.target.value)}
-                  placeholder="Paste token mint… (or click Load from Watch)"
+                  placeholder="Token mint address…"
                   spellCheck={false}
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -1186,7 +1046,7 @@ function App() {
               </div>
 
               <div className="row">
-                <label>Size</label>
+                <label>Amount (SOL)</label>
                 <div className="inline">
                   <input
                     value={amountSol}
@@ -1206,142 +1066,78 @@ function App() {
                     </button>
                   </div>
                 </div>
-                {tradeMode === 'paper' ? <div className="note">Paper mode: trades affect your paper wallet only.</div> : null}
               </div>
 
               <div className="row">
-                <label>Slippage</label>
+                <label>Slippage (bps)</label>
                 <div className="inline">
-                  <div className="quick">
-                    <button
-                      className={slippageBps === 100 ? 'pillBtn pillBtnActive' : 'pillBtn'}
-                      onClick={() => setSlippageBps(100)}
-                    >
-                      1%
-                    </button>
-                    <button
-                      className={slippageBps === 300 ? 'pillBtn pillBtnActive' : 'pillBtn'}
-                      onClick={() => setSlippageBps(300)}
-                    >
-                      3%
-                    </button>
-                    <button
-                      className={slippageBps === 500 ? 'pillBtn pillBtnActive' : 'pillBtn'}
-                      onClick={() => setSlippageBps(500)}
-                    >
-                      5%
-                    </button>
-                    <button
-                      className={slippageBps === 1000 ? 'pillBtn pillBtnActive' : 'pillBtn'}
-                      onClick={() => setSlippageBps(1000)}
-                    >
-                      10%
-                    </button>
-                  </div>
-                  <div className="pill">{(slippageBps / 100).toFixed(2)}%</div>
+                  <input
+                    value={String(slippageBps)}
+                    onChange={(e) => setSlippageBps(Number(e.target.value))}
+                    inputMode="numeric"
+                    placeholder="4000"
+                  />
                 </div>
               </div>
 
               <div className="ctaRow">
-                <button className="primary" disabled={!canTrade || step !== 'idle'} onClick={buy}>
-                  Buy
-                </button>
-                <button className="secondary" disabled={!canTrade || step !== 'idle'} onClick={() => void sellPercent(100)}>
-                  Sell
-                </button>
-                <button className="ghost" onClick={() => void refreshBalances()} disabled={!publicKey}>
-                  Refresh
+                <button className="primary" onClick={buy} disabled={step !== 'idle'} style={{ flex: 1 }}>
+                  {step === 'idle' ? 'Snipe' : step === 'done' ? 'Done' : `${step}…`}
                 </button>
               </div>
 
-              <div className="statusCompact">
-                <div className="statusGrid">
-                  <div className="kpi">
-                    <div className="kpiLabel">Wallet</div>
-                    <div className="kpiValue">{connectedPk ? shortPk(connectedPk) : 'Not connected'}</div>
-                  </div>
-                  <div className="kpi">
-                    <div className="kpiLabel">SOL</div>
-                    <div className="kpiValue">{solBalanceLamports === null ? '—' : `${formatSol(solBalanceLamports)} SOL`}</div>
-                  </div>
-                  <div className="kpi">
-                    <div className="kpiLabel">Token</div>
-                    <div className="kpiValue">
-                      {tokenBalance
-                        ? `${baseUnitsToUi(tokenBalance.amount, tokenBalance.decimals).toFixed(6)} (${tokenBalance.decimals}dp)`
-                        : '—'}
-                    </div>
-                  </div>
-                  <div className="kpi">
-                    <div className="kpiLabel">API</div>
-                    <div className="kpiValue">{wsStatus}</div>
-                  </div>
+              {error ? <div className="error">{error}</div> : null}
+              {txSig ? (
+                <div className="note">
+                  <a
+                    href={`https://solscan.io/tx/${txSig}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                  >
+                    View on Solscan
+                  </a>
                 </div>
+              ) : null}
 
-                {txSig ? (
-                  <div className="statusLine">
-                    <span className="muted">Tx</span>
-                    <a href={`https://solscan.io/tx/${txSig}`} target="_blank" rel="noreferrer">
-                      {shortPk(txSig)}
-                    </a>
-                  </div>
-                ) : null}
-                {error ? <div className="error">{error}</div> : null}
-
-                <details className="details">
-                  <summary className="summary">Diagnostics / Settings</summary>
-                  <div className="row">
-                    <label>Trading API WS URL</label>
-                    <input value={wsUrl} onChange={(e) => setWsUrl(e.target.value)} spellCheck={false} />
-                  </div>
-                  <div className="row">
-                    <label>API key (dev only)</label>
-                    <input value={apiKey} onChange={(e) => setApiKey(e.target.value)} spellCheck={false} />
-                  </div>
-                  <div className="row">
-                    <label>Auth token (preferred)</label>
-                    <input value={authToken} onChange={(e) => setAuthToken(e.target.value)} spellCheck={false} />
-                  </div>
-                  <div className="ctaRow">
-                    <button className="primary" onClick={connectTradingApi} disabled={step !== 'idle'}>
-                      Connect
-                    </button>
-                    <button
-                      className="secondary"
-                      onClick={() => {
-                        wsRef.current?.close()
-                        setWsStatus('disconnected')
-                      }}
-                      disabled={step !== 'idle'}
-                    >
-                      Disconnect
-                    </button>
-                  </div>
-
-                  <div className="note">
-                    MVP is non-custodial: this UI never receives private keys. The Trading API must include
-                    <span className="mono"> route.serializedQuote</span> in <span className="mono">quote_result</span>.
-                  </div>
-                </details>
+              <div className="statusCompact">
+                <div className="statusLine">
+                  <span className="muted">SOL Balance</span>
+                  <span className="mono">{solBalanceLamports !== null ? (Number(solBalanceLamports) / 1e9).toFixed(4) : '—'}</span>
+                </div>
+                <div className="statusLine">
+                  <span className="muted">Token Balance</span>
+                  <span className="mono">
+                    {tokenBalance !== null ? (Number(tokenBalance.amount) / Math.pow(10, tokenBalance.decimals)).toFixed(4) : '—'}
+                  </span>
+                </div>
               </div>
             </section>
 
+            {/* WATCHING TABLE */}
             <section className="panel">
               <div className="panelHead">
-                <div className="panelTitle">Positions</div>
-                <div className="panelHint">Paper portfolio + quick exits</div>
+                <div className="panelTitle">Watching</div>
+                <div className="panelHint">Manual tracked tokens</div>
               </div>
 
-              <div className="statusCompact">
-                <div className="statusGrid">
-                  <div className="kpi">
-                    <div className="kpiLabel">Paper SOL</div>
-                    <div className="kpiValue">{formatSol(bigintFromString(paper.solLamports), 4)} SOL</div>
-                  </div>
-                  <div className="kpi">
-                    <div className="kpiLabel">Positions</div>
-                    <div className="kpiValue">{paper.positions.length}</div>
-                  </div>
+              <div className="row">
+                <label>Add token</label>
+                <div className="inline">
+                  <input
+                    value={watchMintInput}
+                    onChange={(e) => setWatchMintInput(e.target.value)}
+                    placeholder="Paste token mint…"
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                  />
+                  <button className="primary" onClick={addWatchedToken} disabled={step !== 'idle'}>
+                    Watch
+                  </button>
+                </div>
+                <div className="note">
+                  Tier limit: {watched.length}/{gates.maxWatchedTokens}
                 </div>
               </div>
 
@@ -1350,91 +1146,87 @@ function App() {
                   <thead>
                     <tr>
                       <th>Token</th>
-                      <th>PnL</th>
-                      <th>Value</th>
+                      <th>Growth</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {paper.positions.map((p) => {
-                      const current = watched.find((w) => w.mint === p.mint)?.lastPriceProxyScaled
-                      const curScaled = current ? bigintFromString(current) : bigintFromString(p.lastPriceProxyScaled || '0')
-                      const pnl = curScaled > 0n ? positionPnlPct(p, curScaled) : undefined
-                      const valueLamports = curScaled > 0n ? positionValueLamports(p, curScaled) : 0n
-                      return (
-                        <tr key={p.mint}>
-                          <td className="mono">{shortPk(p.mint)}</td>
-                          <td className={pnl !== undefined && pnl > 0 ? 'pos' : pnl !== undefined && pnl < 0 ? 'neg' : ''}>
-                            {pnl === undefined ? '—' : `${pnl.toFixed(2)}%`}
-                          </td>
-                          <td className="muted">{curScaled > 0n ? `${formatSol(valueLamports, 4)} SOL` : '—'}</td>
-                          <td>
-                            <div className="tableBtns">
-                              <button className="ghost" onClick={() => void paperSellMint(p.mint, 25)}>
-                                25%
-                              </button>
-                              <button className="ghost" onClick={() => void paperSellMint(p.mint, 50)}>
-                                50%
-                              </button>
-                              <button className="secondary" onClick={() => void paperSellMint(p.mint, 100)}>
-                                100%
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                    {!paper.positions.length ? (
-                      <tr>
-                        <td colSpan={4} className="muted">
-                          No paper positions yet.
+                    {watched.map((t) => (
+                      <tr key={t.mint} className={t.growthPct !== undefined && t.growthPct >= growthTriggerPct ? 'rowHot' : ''}>
+                        <td className="mono">{shortPk(t.mint)}</td>
+                        <td className={t.growthPct && t.growthPct > 0 ? 'pos' : t.growthPct && t.growthPct < 0 ? 'neg' : ''}>
+                          {t.growthPct === undefined ? '—' : `${t.growthPct.toFixed(2)}%`}
+                        </td>
+                        <td>
+                          <div className="tableBtns">
+                            <button className="ghost" onClick={() => removeWatchedToken(t.mint)}>
+                              Remove
+                            </button>
+                          </div>
                         </td>
                       </tr>
-                    ) : null}
+                    ))}
                   </tbody>
                 </table>
               </div>
+            </section>
 
-              <details className="details">
-                <summary className="summary">Recent trades (last {paper.trades.length})</summary>
+            {/* PAPER POSITIONS (if in paper mode) */}
+            {tradeMode === 'paper' ? (
+              <section className="panel">
+                <div className="panelHead">
+                  <div className="panelTitle">Paper Positions</div>
+                  <div className="panelHint">Simulated holdings</div>
+                </div>
+
+                <div className="statusGrid">
+                  <div className="kpi">
+                    <div className="kpiLabel">Paper SOL</div>
+                    <div className="kpiValue">{(Number(paper.solLamports) / 1e9).toFixed(4)}</div>
+                  </div>
+                  <div className="kpi">
+                    <div className="kpiLabel">Positions</div>
+                    <div className="kpiValue">{paper.positions.length}</div>
+                  </div>
+                </div>
+
                 <div className="tableWrap">
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>Time</th>
-                        <th>Side</th>
                         <th>Token</th>
-                        <th>Δ SOL</th>
+                        <th>PnL</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {paper.trades.map((t) => {
-                        const sol = bigintFromString(t.solLamportsDelta)
-                        const solUi = Number(sol) / 1_000_000_000
+                      {paper.positions.map((pos) => {
+                        const pnl =
+                          ((Number(bigintFromString(pos.lastPriceProxyScaled || '0')) / Number(PRICE_PROXY_SCALE)) /
+                            (Number(bigintFromString(pos.entryPriceProxyScaled)) / Number(PRICE_PROXY_SCALE)) -
+                            1) *
+                          100
                         return (
-                          <tr key={t.id}>
-                            <td className="muted">{new Date(t.ts).toLocaleTimeString()}</td>
-                            <td className={t.side === 'buy' ? 'neg' : 'pos'}>{t.side.toUpperCase()}</td>
-                            <td className="mono">{shortPk(t.mint)}</td>
-                            <td className={solUi >= 0 ? 'pos' : 'neg'}>
-                              {solUi >= 0 ? '+' : ''}
-                              {solUi.toFixed(4)}
+                          <tr key={pos.mint}>
+                            <td className="mono">{shortPk(pos.mint)}</td>
+                            <td className={pnl >= 0 ? 'pos' : 'neg'}>{pnl.toFixed(2)}%</td>
+                            <td>
+                              <div className="tableBtns">
+                                {([25, 50, 100] as const).map((pct) => (
+                                  <button key={pct} className="ghost" onClick={() => void paperSellMint(pos.mint, pct)}>
+                                    {pct}%
+                                  </button>
+                                ))}
+                              </div>
                             </td>
                           </tr>
                         )
                       })}
-                      {!paper.trades.length ? (
-                        <tr>
-                          <td colSpan={4} className="muted">
-                            No paper trades yet.
-                          </td>
-                        </tr>
-                      ) : null}
                     </tbody>
                   </table>
                 </div>
-              </details>
-            </section>
+              </section>
+            ) : null}
           </aside>
         </main>
       ) : (
