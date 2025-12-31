@@ -988,46 +988,56 @@ function App() {
             {feedError ? <div className="error" style={{ marginBottom: '12px' }}>Feed: {feedError}</div> : null}
 
             <div className="tokenGrid">
-              {feed.slice(0, 12).map((t) => (
-                <div key={t.mint} className="tokenCard">
-                  <div className="tokenTop">
-                    <div className="tokenName">{t.name || shortPk(t.mint)}{t.symbol ? <span className="tokenSym">({t.symbol})</span> : null}</div>
-                    <div className={t.growthPct !== undefined && t.growthPct > 0 ? 'pos' : t.growthPct !== undefined && t.growthPct < 0 ? 'neg' : 'muted'}>
-                      {t.growthPct === undefined ? '—' : `${t.growthPct.toFixed(2)}%`}
+              {feed.slice(0, 12).map((t) => {
+                // Dynamic heat mapping based on growth %
+                const growth = t.growthPct ?? 0
+                const heatClass = growth < 10 ? 'token-card-cool' : growth > 50 ? 'token-card-hot' : growth > 25 ? 'token-card-warm' : ''
+                
+                return (
+                  <div key={t.mint} className={`tokenCard ${heatClass}`}>
+                    <div className="tokenTop">
+                      <div className="tokenName">{t.name || shortPk(t.mint)}{t.symbol ? <span className="tokenSym">({t.symbol})</span> : null}</div>
+                      <div className={t.growthPct !== undefined && t.growthPct > 0 ? 'pos' : t.growthPct !== undefined && t.growthPct < 0 ? 'neg' : 'muted'}>
+                        {t.growthPct === undefined ? '—' : `${t.growthPct.toFixed(2)}%`}
+                      </div>
                     </div>
+                    <div className="tokenMeta">
+                      <span className="muted mono">{shortPk(t.mint)}</span>
+                      <span className="muted">{t.startedAt ? `${formatAge(Date.now() - t.startedAt)} ago` : ''}</span>
+                      <span className="muted">{t.detectedMc ? `$${Math.round(t.detectedMc).toLocaleString()}` : ''}</span>
+                    </div>
+                    <div className="tokenActions">
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setTokenMint(t.mint)
+                          void refreshBalances()
+                        }}
+                      >
+                        Load
+                      </button>
+                      <button className="ghost" onClick={() => watchMint(t.mint)}>
+                        Watch
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={step !== 'idle'}
+                        onClick={() => {
+                          setTokenMint(t.mint)
+                          // Add snipe trigger animation to main container
+                          const mainContainer = document.querySelector('.gridSnipe')
+                          mainContainer?.classList.add('snipe-trigger')
+                          setTimeout(() => mainContainer?.classList.remove('snipe-trigger'), 200)
+                          void buy()
+                        }}
+                      >
+                        Snipe
+                      </button>
+                    </div>
+                    {t.error ? <div className="note">Quote: {t.error}</div> : null}
                   </div>
-                  <div className="tokenMeta">
-                    <span className="muted mono">{shortPk(t.mint)}</span>
-                    <span className="muted">{t.startedAt ? `${formatAge(Date.now() - t.startedAt)} ago` : ''}</span>
-                    <span className="muted">{t.detectedMc ? `$${Math.round(t.detectedMc).toLocaleString()}` : ''}</span>
-                  </div>
-                  <div className="tokenActions">
-                    <button
-                      className="ghost"
-                      onClick={() => {
-                        setTokenMint(t.mint)
-                        void refreshBalances()
-                      }}
-                    >
-                      Load
-                    </button>
-                    <button className="ghost" onClick={() => watchMint(t.mint)}>
-                      Watch
-                    </button>
-                    <button
-                      className="primary"
-                      disabled={step !== 'idle'}
-                      onClick={() => {
-                        setTokenMint(t.mint)
-                        void buy()
-                      }}
-                    >
-                      Snipe
-                    </button>
-                  </div>
-                  {t.error ? <div className="note">Quote: {t.error}</div> : null}
-                </div>
-              ))}
+                )
+              })}
               {!feed.length ? <div className="muted">No live tokens yet (feed empty).</div> : null}
             </div>
 
