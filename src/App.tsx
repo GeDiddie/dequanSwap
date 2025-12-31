@@ -218,7 +218,7 @@ function App() {
   )
 
   const defaultDequanwDashBase = import.meta.env.VITE_DEQUANW_DASH_BASE || '/dequanw'
-  const [dequanwDashBase, setDequanwDashBase] = useState(defaultDequanwDashBase)
+  const dequanwDashBase = defaultDequanwDashBase
   const [feed, setFeed] = useState<FeedToken[]>([])
   const [feedError, setFeedError] = useState<string>('')
 
@@ -981,28 +981,11 @@ function App() {
         <main className="gridSnipe">
           <section className="panel">
             <div className="panelHead">
-              <div className="panelTitle">Watch</div>
-              <div className="panelHint">Growth scan + one-click actions</div>
+              <div className="panelTitle">Live Feed</div>
+              <div className="panelHint">Auto-refreshing tokens from dequanW strategy</div>
             </div>
 
-            <div className="row">
-              <label>Live feed (dequanW evaluations)</label>
-              <div className="inline">
-                <input
-                  value={dequanwDashBase}
-                  onChange={(e) => setDequanwDashBase(e.target.value)}
-                  placeholder="/dequanw (dev) or https://your-host"
-                  spellCheck={false}
-                />
-                <button className="ghost" onClick={() => void fetchDequanwFeed()}>
-                  Refresh
-                </button>
-              </div>
-              <div className="note">
-                Pulls from <span className="mono">{dequanwDashBase || '—'}/feed</span> + <span className="mono">{dequanwDashBase || '—'}/watching</span>. In dev, <span className="mono">/dequanw</span> proxies to port 8901.
-              </div>
-              {feedError ? <div className="error">Feed: {feedError}</div> : null}
-            </div>
+            {feedError ? <div className="error" style={{ marginBottom: '12px' }}>Feed: {feedError}</div> : null}
 
             <div className="tokenGrid">
               {feed.slice(0, 12).map((t) => (
