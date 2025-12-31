@@ -218,7 +218,7 @@ function App() {
   )
 
   const defaultDequanwDashBase = import.meta.env.VITE_DEQUANW_DASH_BASE || '/dequanw'
-  const [dequanwDashBase, setDequanwDashBase] = useState(() => loadSetting('dequanswap.dequanwDashBase', defaultDequanwDashBase))
+  const [dequanwDashBase, setDequanwDashBase] = useState(defaultDequanwDashBase)
   const [feed, setFeed] = useState<FeedToken[]>([])
   const [feedError, setFeedError] = useState<string>('')
 
