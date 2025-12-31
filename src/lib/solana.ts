@@ -36,23 +36,50 @@ export async function getTokenBalanceBaseUnits(
   let total = 0n
   let decimals: number | null = null
 
+  const readParsedInfo = (data: unknown): unknown => {
+    if (!data || typeof data !== 'object') return undefined
+    if (!('parsed' in data)) return undefined
+    return (data as { parsed?: unknown }).parsed
+  }
+
+  const readTokenAmount = (parsed: unknown): { amount?: string; decimals?: number } | undefined => {
+    if (!parsed || typeof parsed !== 'object') return undefined
+    if (!('info' in parsed)) return undefined
+    const info = (parsed as { info?: unknown }).info
+    if (!info || typeof info !== 'object') return undefined
+    if (!('tokenAmount' in info)) return undefined
+    const tokenAmount = (info as { tokenAmount?: unknown }).tokenAmount
+    if (!tokenAmount || typeof tokenAmount !== 'object') return undefined
+    const amount = 'amount' in tokenAmount ? (tokenAmount as { amount?: unknown }).amount : undefined
+    const dec = 'decimals' in tokenAmount ? (tokenAmount as { decimals?: unknown }).decimals : undefined
+    return {
+      amount: typeof amount === 'string' ? amount : undefined,
+      decimals: typeof dec === 'number' ? dec : undefined,
+    }
+  }
+
   for (const { account } of res.value) {
-    const info = (account.data as any).parsed?.info
-    const tokenAmount = info?.tokenAmount
+    const parsed = readParsedInfo(account.data as unknown)
+    const tokenAmount = readTokenAmount(parsed)
     if (!tokenAmount?.amount) continue
 
     total += BigInt(tokenAmount.amount)
-    if (decimals === null && typeof tokenAmount.decimals === 'number') {
-      decimals = tokenAmount.decimals
-    }
+    if (decimals === null && typeof tokenAmount.decimals === 'number') decimals = tokenAmount.decimals
   }
 
   if (decimals === null) {
     // Fallback: try reading mint account decimals
     const mintInfo = await connection.getParsedAccountInfo(mint, 'confirmed')
-    const parsed = (mintInfo.value?.data as any)?.parsed
-    const mintDecimals = parsed?.info?.decimals
-    decimals = typeof mintDecimals === 'number' ? mintDecimals : 0
+    const parsed = readParsedInfo(mintInfo.value?.data as unknown)
+    let mintDecimals: number | undefined
+    if (parsed && typeof parsed === 'object' && 'info' in parsed) {
+      const info = (parsed as { info?: unknown }).info
+      if (info && typeof info === 'object' && 'decimals' in info) {
+        const d = (info as { decimals?: unknown }).decimals
+        if (typeof d === 'number') mintDecimals = d
+      }
+    }
+    decimals = mintDecimals ?? 0
   }
 
   return { amount: total, decimals }

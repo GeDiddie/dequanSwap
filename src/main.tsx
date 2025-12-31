@@ -8,7 +8,7 @@ import App from './App.tsx'
 import './index.css'
 import '@solana/wallet-adapter-react-ui/styles.css'
 
-function Root() {
+export function Root() {
   const endpoint = import.meta.env.VITE_SOLANA_RPC_URL || clusterApiUrl('mainnet-beta')
   const wallets = useMemo(() => [new PhantomWalletAdapter()], [])
 

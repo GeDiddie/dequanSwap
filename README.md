@@ -40,3 +40,10 @@ The Trading API must include `route.serializedQuote` inside `quote_result`, beca
 ## Roadmap note (tiered features)
 
 MVP is intentionally minimal. dequanW advanced features (risk controls, strategies, premium execution features) can be gated later behind a tiered plan.
+
+## Product docs
+
+Tiering + UX build guidelines live in:
+
+- docs/product/README.md
+
