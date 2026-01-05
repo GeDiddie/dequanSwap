@@ -4,6 +4,7 @@ import {
   VersionedTransaction,
   Transaction,
   LAMPORTS_PER_SOL,
+  Keypair,
 } from '@solana/web3.js'
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token'
 
@@ -92,6 +93,15 @@ export function deserializeTx(base64: string): Transaction | VersionedTransactio
   } catch {
     return Transaction.from(bytes)
   }
+}
+
+export function signTxWithKeypair(tx: Transaction | VersionedTransaction, signer: Keypair) {
+  if (tx instanceof VersionedTransaction) {
+    tx.sign([signer])
+    return tx
+  }
+  tx.partialSign(signer)
+  return tx
 }
 
 export function toBaseUnits(amountUi: number, decimals: number): bigint {

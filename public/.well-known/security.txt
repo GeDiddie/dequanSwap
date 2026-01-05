@@ -1,0 +1,6 @@
+Contact: mailto:support@dequan.xyz
+Expires: 2026-12-31T23:59:59.000Z
+Preferred-Languages: en
+Policy: https://snipe.dequan.xyz
+
+# If you believe you have found a security issue, please email us with details.

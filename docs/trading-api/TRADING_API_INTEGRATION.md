@@ -186,7 +186,48 @@ The UI project docs should cover *how* to connect wallets and request signatures
 **Authentication:** required.
 
 - For private/internal usage, this can be an API key.
-- For public sites, prefer **short-lived tokens** minted by an auth backend (do not ship long-lived secrets to browsers).
+- For public sites, prefer **wallet-signature WS auth** (challenge/response) or short-lived JWTs minted by a Control Plane.
+
+Recommended (public): wallet signature challenge/response
+
+Server sends a per-connection challenge in the initial `hello`. Client signs it with the connected wallet and responds using the existing `auth` message.
+
+```javascript
+const ws = new WebSocket('wss://your-trading-ws.example');
+
+ws.onmessage = async (ev) => {
+  const msg = JSON.parse(ev.data);
+  if (msg.type !== 'hello') return;
+
+  const challenge = msg.auth?.walletSig?.challenge;
+  if (!challenge) return;
+
+  // walletAdapter.signMessage(Uint8Array) -> Uint8Array signature
+  const signatureBytes = await walletAdapter.signMessage(new TextEncoder().encode(challenge));
+  const signatureBase64 = btoa(String.fromCharCode(...signatureBytes));
+
+  ws.send(JSON.stringify({
+    type: 'auth',
+    wallet: walletAdapter.publicKey.toBase58(),
+    signatureBase64,
+  }));
+}
+```
+
+Alternative (public): Control Plane JWT
+
+```javascript
+const ws = new WebSocket('wss://your-trading-ws.example');
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    type: 'auth',
+    jwt: '<short-lived JWT>'
+  }));
+};
+```
+
+Dev-only (private):
 
 ```javascript
 const ws = new WebSocket('ws://localhost:8900');
@@ -200,7 +241,41 @@ ws.onopen = () => {
 };
 ```
 
-**Non-custodial note:** wallet signing does *not* replace socket authentication. Wallet connect proves control of a wallet; it does not prevent random internet clients from calling your API. You still need auth + rate limits.
+Control Plane contract (what the UI calls to mint JWTs):
+- `POST /auth/wallet/challenge`
+- `POST /auth/wallet/verify`
+- `POST /session/token`
+- `GET /jwks.json`
+
+In this repo, the Control Plane MVP implementation lives at: `services/control-plane/`.
+
+### Production checklist (Control Plane + JWT)
+
+Use this when deploying a public dequanSwap that authenticates to the Trading WS with short-lived JWTs.
+
+1) Deploy the Control Plane Worker
+   - Generate ES256 signing keys: `cd services/control-plane && npm run gen-key`
+   - Set Worker secrets:
+     - `CONTROL_PLANE_JWT_PRIVATE_JWK` (private JWK JSON string)
+     - `CONTROL_PLANE_JWT_KID` (kid string)
+   - Set Worker vars:
+     - `CONTROL_PLANE_ISSUER` (example: `dequanswap-control-plane`)
+     - `TRADING_WS_AUDIENCE` (example: `dequanw-trading-ws`)
+     - `CONTROL_PLANE_ALLOWED_ORIGINS` must include your deployed UI origin (example: `https://snipe.dequan.xyz`)
+   - Deploy: `npm run deploy`
+
+2) Wire the dequanW Trading API to trust the Control Plane JWKS
+   - Set dequanW env vars:
+     - `TRADING_API_JWT_ISSUER` = same as Control Plane `CONTROL_PLANE_ISSUER`
+     - `TRADING_API_JWT_AUDIENCE` = same as Control Plane `TRADING_WS_AUDIENCE`
+     - `TRADING_API_JWT_JWKS_URL` = `https://auth.dequan.xyz/jwks.json`
+   - Restart the Trading API WebSocket server.
+
+3) Configure the dequanSwap frontend
+  - Set `VITE_CONTROL_PLANE_URL=https://auth.dequan.xyz`
+   - Ensure the site is served over HTTPS (required for the Control Plane session cookie in production).
+
+**Non-custodial note:** wallet signing *can be* the socket authentication (challenge/response). You still need rate limits.
 
 ---
 

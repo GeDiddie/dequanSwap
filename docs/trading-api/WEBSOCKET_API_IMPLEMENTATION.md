@@ -1097,9 +1097,9 @@ node test-trading-api.js
 
 ### 1. Authentication
 
-- Use strong API keys (minimum 32 characters)
-- Implement key rotation
-- Consider JWT tokens for session management
+- Private/dev: use strong API keys (minimum 32 characters) and rotate them.
+- Public production: **do not** ship long-lived API keys to browsers. Use a Control Plane to mint **short-lived JWTs** and have the WS engine verify them via JWKS (`/jwks.json`).
+- Always enforce auth server-side (UI gating is UX only).
 
 ### 2. Rate Limiting
 

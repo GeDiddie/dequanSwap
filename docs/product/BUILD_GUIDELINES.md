@@ -3,7 +3,7 @@
 These are the rules for implementing tiered UX and trading features safely.
 
 ## Architecture principles
-- Keep the UI **mode-based** (Free/Minimalist/Pro/Elite), not settings-based.
+- Keep the UI **mode-based** (Scout/Sniper/Apex), not settings-based.
 - Keep “infra config” (WS URLs, tokens) out of the main surface; put it in a Diagnostics drawer.
 - Never rely on UI-only gating for safety.
 

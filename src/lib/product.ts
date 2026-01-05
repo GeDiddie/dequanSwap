@@ -1,24 +1,35 @@
-export type ProductTier = 'free' | 'minimalist' | 'pro' | 'elite'
+export type ProductTier = 'free' | 'pro' | 'elite'
 export type TradeMode = 'paper' | 'live'
 
 export type TierGates = {
   allowLiveTrading: boolean
+  allowFastMode: boolean
+  tradeFeeBps: number
   maxWatchedTokens: number
   quotePollMs: number
 }
 
 export const DEFAULT_TIER: ProductTier = 'free'
 
+export function tierDisplayName(tier: ProductTier): string {
+  switch (tier) {
+    case 'free':
+      return 'Scout'
+    case 'pro':
+      return 'Sniper'
+    case 'elite':
+      return 'Apex'
+  }
+}
+
 export function gatesForTier(tier: ProductTier): TierGates {
   switch (tier) {
     case 'free':
-      return { allowLiveTrading: false, maxWatchedTokens: 10, quotePollMs: 4000 }
-    case 'minimalist':
-      return { allowLiveTrading: true, maxWatchedTokens: 50, quotePollMs: 1500 }
+      return { allowLiveTrading: true, allowFastMode: false, tradeFeeBps: 100, maxWatchedTokens: 5, quotePollMs: 4000 }
     case 'pro':
-      return { allowLiveTrading: true, maxWatchedTokens: 200, quotePollMs: 800 }
+      return { allowLiveTrading: true, allowFastMode: true, tradeFeeBps: 75, maxWatchedTokens: 20, quotePollMs: 800 }
     case 'elite':
-      return { allowLiveTrading: true, maxWatchedTokens: 500, quotePollMs: 500 }
+      return { allowLiveTrading: true, allowFastMode: true, tradeFeeBps: 50, maxWatchedTokens: 999, quotePollMs: 500 }
   }
 }
 
@@ -33,7 +44,9 @@ export function saveSetting(key: string, value: string) {
 
 export function loadTier(): ProductTier {
   const raw = loadSetting('dequanswap.tier', DEFAULT_TIER)
-  if (raw === 'free' || raw === 'minimalist' || raw === 'pro' || raw === 'elite') return raw
+  // Back-compat: older builds used 'minimalist'. Map it to 'pro'.
+  if (raw === 'minimalist') return 'pro'
+  if (raw === 'free' || raw === 'pro' || raw === 'elite') return raw
   return DEFAULT_TIER
 }
 

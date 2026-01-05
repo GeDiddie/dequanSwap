@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useRef, useEffect } from 'react'
 import { motion } from 'framer-motion'
 
 interface TokenRowProps {
@@ -6,9 +6,17 @@ interface TokenRowProps {
     mint: string
     name?: string
     symbol?: string
-    growthPct?: number
     startedAt?: number
     detectedMc?: number
+    mcEntry?: number
+    mcCurrent?: number
+    mcGrowthPct?: number
+    isRugged?: boolean
+    liquidityStatus?: 'active' | 'removed' | 'unknown'
+    liquidityRemovedAt?: number
+    liquidityRemovedSig?: string
+    liquidityRemovedInstruction?: string
+    liquidityRemovedReason?: string
     error?: string
   }
   onLoad: (mint: string) => void
@@ -31,97 +39,191 @@ const formatAge = (ms: number) => {
 }
 
 export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSnipe, disabled }) => {
-  const growth = token.growthPct ?? 0
+  const hasGrowth = typeof token.mcGrowthPct === 'number' && Number.isFinite(token.mcGrowthPct)
+  const growth = hasGrowth ? (token.mcGrowthPct as number) : 0
+  const prevGrowthRef = useRef(growth)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const [isHovered, setIsHovered] = React.useState(false)
+  
   const heatWidth = Math.min(Math.max(growth, 0), 100)
   const isHot = growth > 50
   const isWarm = growth > 25 && growth <= 50
   const isCool = growth < 10
 
-  // Determine heat class for border
-  const getHeatClass = () => {
-    if (isHot) return 'border-l-red-500 shadow-[inset_10px_0_15px_-10px_rgba(239,68,68,0.3)]'
-    if (isWarm) return 'border-l-yellow-500 shadow-[inset_10px_0_15px_-10px_rgba(234,179,8,0.3)]'
-    if (isCool) return 'border-l-blue-500 shadow-[inset_10px_0_15px_-10px_rgba(59,130,246,0.3)]'
-    return 'border-l-transparent'
+  const accent = isHot
+    ? 'rgba(248,81,73,0.95)'
+    : isWarm
+      ? 'rgba(234,179,8,0.95)'
+      : isCool
+        ? 'rgba(0,212,255,0.95)'
+        : 'rgba(57,211,83,0.95)'
+
+  const heatAccent = isHot
+    ? 'rgba(248,81,73,0.22)'
+    : isWarm
+      ? 'rgba(234,179,8,0.18)'
+      : isCool
+        ? 'rgba(0,212,255,0.16)'
+        : 'rgba(57,211,83,0.18)'
+
+  const ageMs = token.startedAt ? Date.now() - token.startedAt : 0
+  const isDead = ageMs > 5 * 60 * 1000
+  const isStale = !isDead && ageMs > 60 * 1000
+
+  const isRugged = token.isRugged === true || token.liquidityStatus === 'removed'
+  const badgeLabel = isRugged ? 'RUGGED' : isHot ? 'HOT' : isWarm ? 'WARM' : isCool ? 'COOL' : 'TRACK'
+  const badgeClass = isRugged
+    ? 'tokenRowBadgeHot'
+    : isHot
+      ? 'tokenRowBadgeHot'
+      : isWarm
+        ? 'tokenRowBadgeWarm'
+        : isCool
+          ? 'tokenRowBadgeCool'
+          : 'tokenRowBadgeTrack'
+
+  const formatUsd = (n: number) => {
+    try {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        maximumFractionDigits: 0,
+        notation: n >= 10_000 ? 'compact' : 'standard',
+      }).format(n)
+    } catch {
+      return `$${Math.round(n).toLocaleString()}`
+    }
   }
+
+  // Trigger kinetic feedback on growth changes
+  useEffect(() => {
+    if (!rowRef.current) return
+    if (!hasGrowth) return
+    
+    const prevGrowth = prevGrowthRef.current
+    const delta = growth - prevGrowth
+
+    const thresholds = [25, 50, 100]
+    const crossed = thresholds.some((t) => prevGrowth < t && growth >= t)
+    
+    // Level 1: Subtle update (Slow fade)
+    if (delta > 0 && delta < 10) {
+      rowRef.current.style.transition = 'background 1s'
+      rowRef.current.style.backgroundColor = 'rgba(0, 255, 127, 0.05)'
+      setTimeout(() => {
+        if (rowRef.current) rowRef.current.style.backgroundColor = 'transparent'
+      }, 1000)
+    }
+
+    // POP when growth crosses key thresholds
+    if (crossed || delta >= 25) {
+      const cls = growth >= 100 || delta >= 50 ? 'tokenRowPopBig' : 'tokenRowPop'
+      rowRef.current.classList.remove('tokenRowPop', 'tokenRowPopBig')
+      void rowRef.current.offsetWidth
+      rowRef.current.classList.add(cls)
+      setTimeout(() => {
+        if (rowRef.current) rowRef.current.classList.remove('tokenRowPop', 'tokenRowPopBig')
+      }, 420)
+    }
+    
+    // Level 2: Violent Signal (The glitch)
+    if (delta >= 10) {
+      rowRef.current.classList.remove('row-critical-signal')
+      void rowRef.current.offsetWidth // Trigger reflow to restart animation
+      rowRef.current.classList.add('row-critical-signal')
+      
+      // Physical feedback: Subtle shake of the entire dashboard
+      const dashboard = document.getElementById('minimalist-view')
+      if (dashboard) {
+        dashboard.classList.add('snipe-shake')
+        setTimeout(() => dashboard.classList.remove('snipe-shake'), 200)
+      }
+      
+      // Remove critical class after animation
+      setTimeout(() => {
+        if (rowRef.current) rowRef.current.classList.remove('row-critical-signal')
+      }, 400)
+    }
+    
+    prevGrowthRef.current = growth
+  }, [growth, hasGrowth])
 
   return (
     <motion.div
+      ref={rowRef}
       layout
-      initial={{ opacity: 0, y: -20 }}
-      animate={{ opacity: 1, y: 0 }}
+      initial={{ opacity: 0, x: -100, scale: 0.8 }}
+      animate={{ opacity: 1, x: 0, scale: 1 }}
       exit={{ opacity: 0, x: -20 }}
       transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-      className={`relative group flex items-center justify-between p-3 mb-1 border-b border-white/5 
-        bg-gradient-to-r from-transparent to-transparent hover:from-white/5 transition-all duration-200
-        border-l-2 ${getHeatClass()}`}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+      className={`token-row-container legible-text tokenRow ${isHot && !isRugged ? 'tokenRowHotRadiate' : ''} ${isStale ? 'tokenRowStale' : ''} ${isDead ? 'tokenRowDead' : ''}`}
+      style={{
+        borderLeft: `4px solid ${accent}`,
+        boxShadow: isHot
+          ? `0 0 22px rgba(248,81,73,0.28), 0 0 74px rgba(248,81,73,0.18), inset 0 0 18px rgba(248,81,73,0.09)`
+          : isWarm
+            ? `0 0 18px rgba(234,179,8,0.12)`
+            : undefined,
+      }}
     >
       {/* HEAT BAR BACKGROUND */}
       <div
-        className={`absolute inset-0 h-full opacity-10 transition-all duration-1000 ease-out
-          ${isHot ? 'bg-red-600' : isWarm ? 'bg-yellow-500' : 'bg-emerald-500'}`}
-        style={{ width: `${heatWidth}%` }}
+        className="tokenRowHeat"
+        style={{ width: `${heatWidth}%`, background: `linear-gradient(90deg, ${heatAccent}, transparent)` }}
       />
 
-      {/* LEFT: IDENTITY & AGE */}
-      <div className="relative flex items-center space-x-4 w-1/4 min-w-0">
-        <div className="flex flex-col min-w-0">
-          <span className="text-sm font-bold tracking-tighter text-white truncate uppercase">
-            {token.symbol || token.name || shortPk(token.mint)}
-          </span>
-          <span className="text-[10px] text-white/40 font-mono">
-            {token.startedAt ? `${formatAge(Date.now() - token.startedAt)} ago` : '—'}
-          </span>
-        </div>
+      {/* IDENTITY */}
+      <div className="tokenRowIdentity">
+        <div className="tokenRowSymbol">{token.symbol || token.name || shortPk(token.mint)}</div>
+        <div className="tokenRowMeta">{token.startedAt ? `${formatAge(Date.now() - token.startedAt)} ago` : '—'} · {shortPk(token.mint)}</div>
       </div>
 
-      {/* CENTER: CORE SIGNALS */}
-      <div className="relative flex flex-1 items-center justify-around px-4">
-        <div className="flex flex-col items-center">
-          <span className="text-[9px] uppercase text-white/30 font-bold tracking-widest">Market Cap</span>
-          <span className="text-xs font-mono text-white">
-            {token.detectedMc ? `$${Math.round(token.detectedMc).toLocaleString()}` : '—'}
-          </span>
-        </div>
-
-        <div className="flex flex-col items-center">
-          <span className="text-[9px] uppercase text-white/30 font-bold tracking-widest">Signal</span>
-          <span className={`text-sm font-black font-mono ${growth >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {growth > 0 ? '+' : ''}{growth.toFixed(2)}%
-          </span>
-        </div>
-
-        <div className="flex flex-col items-center">
-          <span className="text-[9px] uppercase text-white/30 font-bold tracking-widest">Mint</span>
-          <span className="text-xs font-mono text-white/80">{shortPk(token.mint)}</span>
-        </div>
+      {/* MC */}
+      <div className="tokenRowMetric">
+        <div className="tokenRowLabel">MC</div>
+        <div className="tokenRowValue">{typeof token.mcCurrent === 'number' ? formatUsd(token.mcCurrent) : typeof token.detectedMc === 'number' ? formatUsd(token.detectedMc) : '—'}</div>
+        <div className="tokenRowSub">{typeof token.mcEntry === 'number' ? `Entry ${formatUsd(token.mcEntry)}` : 'Entry —'}</div>
       </div>
 
-      {/* RIGHT: QUICK ACTIONS (VISIBLE ON HOVER) */}
-      <div className="relative flex items-center space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* MC GROWTH */}
+      <div className="tokenRowMetric">
+        <div className="tokenRowLabel">MC Δ</div>
+        <div className="tokenRowValueRow">
+          <div className="tokenRowValue" style={{ color: growth >= 0 ? 'var(--neon-green)' : 'var(--neon-red)' }}>
+            {!hasGrowth ? '—' : `${growth > 0 ? '+' : ''}${growth.toFixed(2)}%`}
+          </div>
+          <span className={`tokenRowBadge ${badgeClass}`}>{badgeLabel}</span>
+        </div>
+        <div className="tokenRowSub">{token.startedAt ? `Age ${formatAge(Date.now() - token.startedAt)}` : 'Age —'}</div>
+      </div>
+
+      {/* ACTIONS */}
+      <div className={`tokenRowActions ${isHovered ? 'tokenRowActionsOn' : ''}`}>
         <button
           onClick={() => onLoad(token.mint)}
-          className="px-3 py-1 text-[10px] font-bold bg-white/10 hover:bg-white/20 text-white rounded uppercase tracking-tighter border border-white/10"
+          className="tokenRowBtn"
         >
           Load
         </button>
         <button
           onClick={() => onWatch(token.mint)}
-          className="px-3 py-1 text-[10px] font-bold bg-white/10 hover:bg-white/20 text-white rounded uppercase tracking-tighter border border-white/10"
+          className="tokenRowBtn"
         >
           Watch
         </button>
         <button
           onClick={() => onSnipe(token.mint)}
-          disabled={disabled}
-          className="px-3 py-1 text-[10px] font-bold bg-emerald-500/80 hover:bg-emerald-400 text-black rounded uppercase tracking-tighter shadow-[0_0_15px_rgba(16,185,129,0.4)] disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={disabled || isRugged}
+          className="tokenRowBtnPrimary"
         >
           Snipe
         </button>
       </div>
 
       {token.error ? (
-        <div className="absolute bottom-0 left-0 right-0 text-[9px] text-red-400/80 px-3 py-1">
+        <div className="tokenRowError">
           {token.error}
         </div>
       ) : null}

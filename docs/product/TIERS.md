@@ -2,8 +2,10 @@
 
 This is the official tier definition for the dequanSwap user-facing product.
 
-## Tier 0: Free (Training / Paper)
+## Tier 0: Scout (Free)
 **Goal:** let anyone learn the system risk-free.
+
+**Identity requirement:** wallet-only (no email/account required)
 
 **Core experience:**
 - Live discovery + watch feed
@@ -16,25 +18,12 @@ This is the official tier definition for the dequanSwap user-facing product.
 - Reduced retention (e.g., last N events only)
 - Presets only (no advanced tuning)
 
-**No live orders.**
+Scout can use Paper or Live trading, but with tighter limits.
 
-## Tier 1: Minimalist (Manual Snipe)
-**Goal:** real trading without full automation.
+## Tier 1: Sniper (Pro)
+**Goal:** faster execution + higher limits.
 
-**Core experience:**
-- Watch tokens from detection time and track **Growth %**
-- User manually executes with one-click actions:
-  - Buy fixed size (e.g., 0.01 / 0.05 / 0.1 SOL)
-  - Sell 25/50/100%
-- Optional “micro-automation” allowed (still minimalist):
-  - Simple TP/SL sliders (one pair)
-
-**Limits:**
-- Presets for slippage/fees; advanced execution hidden by default
-- Small number of concurrent positions by default (e.g., 1–3)
-
-## Tier 2: Pro (Assisted Automation)
-**Goal:** preset-based automation with guardrails.
+**Identity requirement:** paid users must have an account (email) created during upgrade so we can manage subscriptions and renewal reminders.
 
 **Core experience:**
 - Choose a preset strategy (e.g., DequanW 1-minute)
@@ -42,8 +31,14 @@ This is the official tier definition for the dequanSwap user-facing product.
 - Hard caps: max spend per trade/day, max loss/day, max positions
 - Notifications (eligible/bought/sold)
 
-## Tier 3: Elite (Strategy Lab)
+**Fast Mode:**
+- Available on Sniper and above.
+- Faster execution flows with strict caps and explicit user opt-in.
+
+## Tier 2: Apex (Elite)
 **Goal:** full power controls for advanced users.
+
+**Identity requirement:** paid users must have an account (email) created during upgrade so we can manage subscriptions and renewal reminders.
 
 **Core experience:**
 - Full strategy configuration surface
@@ -54,7 +49,6 @@ This is the official tier definition for the dequanSwap user-facing product.
 ---
 
 ## Tier-to-Mode mapping (UI)
-- Free → **Observe + Paper**
-- Minimalist → **Observe + Manual Execute**
-- Pro → **Observe + Assisted Auto**
-- Elite → **Strategy Lab**
+- Scout → **Observe + Manual Execute (+ Paper)**
+- Sniper → **Faster execution (+ Fast Mode)**
+- Apex → **Strategy Lab (+ Fast Mode)**

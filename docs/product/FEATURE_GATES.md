@@ -9,34 +9,39 @@ This document defines what is **enabled**, **disabled**, or **limited** by tier.
 
 ## Gate matrix (v0)
 
-| Capability | Free | Minimalist | Pro | Elite |
-|---|---:|---:|---:|---:|
-| Paper trading | ✅ | ✅ | ✅ | ✅ |
-| Live trading | ❌ | ✅ | ✅ | ✅ |
-| Watchlist + Growth % | ✅ (limited) | ✅ | ✅ | ✅ |
-| Manual buy/sell buttons | ✅ (paper only) | ✅ | ✅ | ✅ |
-| Alerts on growth thresholds | ❌ (later) | ✅ | ✅ | ✅ |
-| Auto-buy | ❌ | ❌ | ✅ | ✅ |
-| Strategy presets | ❌ | ❌ | ✅ | ✅ |
-| Full strategy tuning | ❌ | ❌ | ❌ | ✅ |
-| Higher throughput (more watched tokens) | ❌ | ⚠️ | ✅ | ✅ |
+| Capability | Scout | Sniper | Apex |
+|---|---:|---:|---:|
+| Paper trading | ✅ | ✅ | ✅ |
+| Live trading | ✅ (limited) | ✅ | ✅ |
+| Watchlist + Growth % | ✅ (limited) | ✅ | ✅ |
+| Manual buy/sell buttons | ✅ | ✅ | ✅ |
+| Holdings metadata (buy time + buy MC) | ✅ | ✅ | ✅ |
+| Holdings real-time chart | ✅ (limited) | ✅ | ✅ |
+| Sold history (trade journal) | ✅ | ✅ | ✅ |
+| Alerts on growth thresholds | ❌ (later) | ✅ | ✅ |
+| Take profit / stop loss (TP/SL) | ❌ (later) | ✅ (later) | ✅ (later) |
+| Auto-sell (rule-triggered exits) | ❌ (later) | ✅ (later) | ✅ (later) |
+| Auto-buy | ❌ (later) | ✅ (later) | ✅ (later) |
+| Fast Mode (speed execution) | ❌ | ✅ | ✅ |
+| Strategy presets | ❌ (later) | ✅ (later) | ✅ (later) |
+| Full strategy tuning | ❌ | ❌ | ✅ (later) |
+| Higher throughput (more watched tokens) | ✅ (limited) | ✅ | ✅ |
+| Server-side persistence (positions/history) | ✅ | ✅ | ✅ |
 
 ## Limits (recommended defaults)
 These are intentionally conservative.
 
-- **Free**
-  - max watched tokens: 10
-  - quote polling: 3–5s
-  - max stored events: 50
+- **Scout**
+  - max watched tokens: 5
+  - quote polling: 4s
 
-- **Minimalist**
-  - max watched tokens: 50
-  - quote polling: 1–2s
-  - max open paper positions: 10
-  - max open live positions: 1–3 (guardrail)
+- **Sniper**
+  - max watched tokens: 20
+  - quote polling: 0.8s
 
-- **Pro/Elite**
-  - raise limits gradually, driven by infra metrics
+- **Apex**
+  - max watched tokens: unlimited
+  - quote polling: 0.5s
 
 ## Definitions
 - **Growth %**: percent change between the first observed “price proxy” and the current price proxy.
