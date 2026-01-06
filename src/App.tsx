@@ -3446,6 +3446,13 @@ function App() {
                             type="button"
                             className="secondary"
                             onClick={() => {
+                              if (tier === 'free') {
+                                try {
+                                  window.alert('Faster sniping is available in paid plans.')
+                                } catch {
+                                  // ignore
+                                }
+                              }
                               setSnipeCardSide('snipe')
                               setTokenMint(watchDrawerMint)
                               const panel = document.getElementById('snipe-panel')
@@ -3537,6 +3544,12 @@ function App() {
                           </div>
                         </div>
                       </div>
+
+                      {tier === 'free' ? (
+                        <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)' }}>
+                          1s Live Candle Chart available in paid plans
+                        </div>
+                      ) : null}
                     </>
                   )
                 })()}
