@@ -886,6 +886,21 @@ function App() {
   const [watchingAddOpen, setWatchingAddOpen] = useState(false)
   const [holdingsOpen, setHoldingsOpen] = useState(true)
   const [copiedMint, setCopiedMint] = useState<string>('')
+  const [uiNow, setUiNow] = useState<number>(() => Date.now())
+
+  useEffect(() => {
+    const id = window.setInterval(() => setUiNow(Date.now()), 2000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  const dequanwServerOk = useMemo(() => {
+    const base = dequanwDashBase.trim()
+    if (!base) return false
+    if (feedError) return false
+    if (!lastFeedFetchedAt) return false
+    // Feed polls every 5s; allow some slack.
+    return uiNow - lastFeedFetchedAt < 20_000
+  }, [dequanwDashBase, feedError, lastFeedFetchedAt, uiNow])
 
   // Auto-collapse Holdings when empty, expand when populated
   useEffect(() => {
@@ -1980,6 +1995,15 @@ function App() {
     return () => clearInterval(id)
   }, [fetchDequanwFeed])
 
+  const clearSnipeForm = useCallback(() => {
+    setError('')
+    setSnipePrompt('')
+    setTxSig('')
+    setTokenMint('')
+    setAmountSol('0.01')
+    setSlippageBps(4000)
+  }, [])
+
   const buy = useCallback(async () => {
     setError('')
     setSnipePrompt('')
@@ -2932,9 +2956,6 @@ function App() {
               <div className="splashMedia splashMediaFallback">Initializing…</div>
             )}
             <div className="splashTaglineBottom">FAST OUT</div>
-            <button className="splashSkip" type="button" onClick={() => requestCloseSplash()}>
-              Skip
-            </button>
           </div>
         </div>
       ) : null}
@@ -3055,7 +3076,7 @@ function App() {
           <div className="engineBlock">
             <RadarPulse isNewTokenFound={isNewTokenFound} isCriticalSignal={hasCriticalSignal} />
             <div className="engineStatus">
-              <span className={wsStatus === 'connected' ? 'dot dotOk' : 'dot dotBad'} />
+              <span className={dequanwServerOk ? 'dot dotOk' : 'dot dotBad'} />
               <div className="enginePowered">powered by dequan</div>
             </div>
           </div>
@@ -3122,9 +3143,9 @@ function App() {
         </div>
       </div>
 
-      <main id="minimalist-view" style={{ display: 'flex', gap: '16px', marginTop: '16px', alignItems: 'start' }}>
+        <main id="minimalist-view" className="minimalistView">
           {/* LEFT 65%: WATCHING (TOP) + LIVE FEED (BOTTOM) */}
-          <div style={{ flex: '0 0 65%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div className="leftRail">
             <section className="panel" style={{ flex: '0 0 auto', overflow: 'visible' }}>
               <div
                 className="panelHead panelHeadClickable"
@@ -3235,11 +3256,11 @@ function App() {
                                 {rugged ? 'RUGGED' : isHot ? 'HOT' : 'HOLD'}
                               </span>
                             </div>
-                            <div className="watchCell watchCellCenter mono" title={formatTs(h.boughtAt)}>
+                            <div className="watchCell watchCellCenter mono" data-label="Buy Age" title={formatTs(h.boughtAt)}>
                               {formatAgeShort(buyAgeMs)}
                             </div>
-                            <div className="watchCell watchCellCenter mono">{formatUsd0(h.buyMc)}</div>
-                            <div className="watchCell watchCellCenter mono">{formatUsd0(h.currentMc)}</div>
+                            <div className="watchCell watchCellCenter mono" data-label="Buy MC">{formatUsd0(h.buyMc)}</div>
+                            <div className="watchCell watchCellCenter mono" data-label="Current MC">{formatUsd0(h.currentMc)}</div>
                             <div
                               className={
                                 typeof pnl === 'number' && pnl > 0
@@ -3248,6 +3269,7 @@ function App() {
                                     ? 'watchCell watchCellCenter mono neg'
                                     : 'watchCell watchCellCenter mono'
                               }
+                              data-label="PnL%"
                             >
                               {typeof pnl === 'number' && Number.isFinite(pnl) ? `${pnl.toFixed(2)}%` : '—'}
                             </div>
@@ -3322,7 +3344,7 @@ function App() {
                   </div>
                   <div className="panelChevron">{watchingOpen ? '▾' : '▸'}</div>
                 </div>
-                <div className="panelHint">Manual tracked tokens</div>
+                <div className="panelHint">Track tokens from Live Feed or add your own</div>
               </div>
 
               {watchingOpen ? (
@@ -3437,9 +3459,9 @@ function App() {
                                 </span>
                               ) : null}
                             </div>
-                            <div className="watchCell watchCellCenter mono">{formatAgeShort(ageMs)}</div>
-                            <div className="watchCell watchCellCenter mono">{formatUsd0(t.entryMc)}</div>
-                            <div className="watchCell watchCellCenter mono">{formatUsd0(t.currentMc)}</div>
+                            <div className="watchCell watchCellCenter mono" data-label="Age">{formatAgeShort(ageMs)}</div>
+                            <div className="watchCell watchCellCenter mono" data-label="Entry MC">{formatUsd0(t.entryMc)}</div>
+                            <div className="watchCell watchCellCenter mono" data-label="Current MC">{formatUsd0(t.currentMc)}</div>
                             <div
                               className={
                                 typeof growth === 'number' && growth > 0
@@ -3448,6 +3470,7 @@ function App() {
                                     ? 'watchCell watchCellCenter mono neg'
                                     : 'watchCell watchCellCenter mono'
                               }
+                              data-label="Growth"
                             >
                               {Number.isFinite(growth) ? `${growth.toFixed(2)}%` : '—'}
                             </div>
@@ -3597,7 +3620,7 @@ function App() {
           </div>
 
           {/* RIGHT 35%: THE COMMAND CENTER (Fixed Sidebar) */}
-          <aside style={{ flex: '0 0 35%', position: 'sticky', top: '100px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <aside className="commandCenter">
             {/* SNIPE PANEL */}
             <section id="snipe-panel" className="panel">
               <div className={`flipCard ${snipeCardSide === 'sell' ? 'isFlipped' : ''}`}>
@@ -3706,6 +3729,9 @@ function App() {
                     <div className="ctaRow">
                       <button className="primary" onClick={buy} disabled={step !== 'idle'} style={{ flex: 1 }}>
                         {step === 'idle' ? 'Snipe' : step === 'done' ? 'Done' : `${step}…`}
+                      </button>
+                      <button className="secondary" onClick={clearSnipeForm} disabled={step !== 'idle'} type="button">
+                        Clear
                       </button>
                     </div>
 

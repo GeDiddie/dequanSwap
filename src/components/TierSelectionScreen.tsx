@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { useEffect, useRef } from 'react'
 import type { ProductTier } from '../lib/product'
 
 interface TierSelectionScreenProps {
@@ -67,8 +68,28 @@ const TIERS: TierConfig[] = [
 ]
 
 export const TierSelectionScreen: React.FC<TierSelectionScreenProps> = ({ onSelectTier, onSubscribeTier, busy }) => {
+  const screenRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    // Fixed-position scroll containers on mobile can restore a stale scroll offset.
+    // Force the Tier screen to start at the top.
+    const el = screenRef.current
+    requestAnimationFrame(() => {
+      try {
+        el?.scrollTo({ top: 0 })
+      } catch {
+        // ignore
+      }
+      try {
+        window.scrollTo({ top: 0 })
+      } catch {
+        // ignore
+      }
+    })
+  }, [])
+
   return (
-    <div className="tierScreen">
+    <div className="tierScreen" ref={screenRef}>
       <motion.div
         className="tierContainer"
         initial={{ opacity: 0, scale: 0.95 }}

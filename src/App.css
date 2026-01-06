@@ -180,25 +180,6 @@ body::before {
   color: rgba(139,148,158,0.90);
 }
 
-.splashSkip {
-  appearance: none;
-  border: 1px solid rgba(255,255,255,0.14);
-  background: rgba(255,255,255,0.06);
-  color: rgba(224,224,224,0.92);
-  padding: 8px 12px;
-  border-radius: 12px;
-  font-weight: 800;
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.splashSkip:hover {
-  border-color: rgba(57,211,83,0.28);
-  box-shadow: 0 0 18px rgba(57,211,83,0.12);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .splashOverlay {
     transition: none;
@@ -1195,6 +1176,90 @@ body::before {
   align-items: start;
 }
 
+.minimalistView {
+  display: flex;
+  gap: 16px;
+  margin-top: 16px;
+  align-items: start;
+}
+
+.leftRail {
+  flex: 0 0 65%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.commandCenter {
+  flex: 0 0 35%;
+  position: sticky;
+  top: 100px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+@media (max-width: 900px) {
+  .minimalistView {
+    flex-direction: column;
+  }
+
+  .leftRail {
+    flex: 1 1 auto;
+  }
+
+  /* Put the Command Center first on mobile so the primary CTA is always near the top. */
+  .commandCenter {
+    order: -1;
+    flex: 1 1 auto;
+    position: static;
+  }
+
+  /* Bigger tap targets on mobile */
+  .ctaRow button {
+    padding: 12px 14px;
+    min-height: 44px;
+  }
+
+  .pillBtn {
+    padding: 10px 12px;
+    min-height: 40px;
+  }
+
+  /* Watch/Holdings rows: stack into a readable card format */
+  .watchHeaderRow {
+    display: none;
+  }
+
+  .watchRow,
+  .watchRowWatching,
+  .watchRowHoldings {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .watchCellCenter {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    text-align: left;
+  }
+
+  .watchCellCenter::before {
+    content: attr(data-label);
+    color: var(--text-muted);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 800;
+  }
+
+  .watchActions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
 .sideStack {
   display: flex;
   flex-direction: column;
@@ -1792,6 +1857,7 @@ button:disabled {
   justify-content: center;
   padding: 2rem;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   z-index: 10000;
 }
 
@@ -1970,6 +2036,7 @@ button:disabled {
 @media (max-width: 768px) {
   .tierScreen {
     padding: 1rem;
+    justify-content: flex-start;
   }
 
   .tierTitle {
