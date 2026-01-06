@@ -3546,7 +3546,7 @@ function App() {
                       </div>
 
                       {tier === 'free' ? (
-                        <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)' }}>
+                        <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)', textAlign: 'center' }}>
                           1s Live Candle Chart available in paid plans
                         </div>
                       ) : null}
