@@ -343,6 +343,33 @@ function formatUsd0(n: number | undefined): string {
   }
 }
 
+function computeQuoteMcProxy(t: {
+  entryMc?: number
+  currentMc?: number
+  basePriceProxyScaled?: string
+  lastPriceProxyScaled?: string
+}): number | undefined {
+  const baseMc = typeof t.entryMc === 'number' && Number.isFinite(t.entryMc) && t.entryMc > 0 ? t.entryMc : t.currentMc
+  if (typeof baseMc !== 'number' || !Number.isFinite(baseMc) || baseMc <= 0) return undefined
+
+  const baseScaled = t.basePriceProxyScaled ? bigintFromString(t.basePriceProxyScaled) : undefined
+  const lastScaled = t.lastPriceProxyScaled ? bigintFromString(t.lastPriceProxyScaled) : undefined
+  if (typeof baseScaled !== 'bigint' || typeof lastScaled !== 'bigint') return undefined
+  if (baseScaled <= 0n || lastScaled <= 0n) return undefined
+
+  // ratio ~= last/base, kept as ratio * 1e6 for stable Number() conversion.
+  const ratioTimes1e6 = (lastScaled * 1_000_000n) / baseScaled
+  if (ratioTimes1e6 <= 0n) return undefined
+  if (bigintAbs(ratioTimes1e6) > BigInt(Number.MAX_SAFE_INTEGER)) return undefined
+
+  const ratio = Number(ratioTimes1e6) / 1_000_000
+  if (!Number.isFinite(ratio) || ratio <= 0) return undefined
+
+  const mc = baseMc * ratio
+  if (!Number.isFinite(mc) || mc <= 0) return undefined
+  return mc
+}
+
 type WatchedToken = {
   mint: string
   addedAt: number
@@ -933,8 +960,15 @@ function App() {
   const [liveFeedOpen, setLiveFeedOpen] = useState(true)
   const [watchingAddOpen, setWatchingAddOpen] = useState(false)
   const [holdingsOpen, setHoldingsOpen] = useState(true)
+  const [useQuoteMcProxyWhenStale, setUseQuoteMcProxyWhenStale] = useState<boolean>(() =>
+    loadSetting('dequanswap.useQuoteMcProxyWhenStale', '1') === '1',
+  )
   const [copiedMint, setCopiedMint] = useState<string>('')
   const [uiNow, setUiNow] = useState<number>(() => Date.now())
+
+  useEffect(() => {
+    saveSetting('dequanswap.useQuoteMcProxyWhenStale', useQuoteMcProxyWhenStale ? '1' : '0')
+  }, [useQuoteMcProxyWhenStale])
 
   const holdingsMcHistoryRef = useRef<Record<string, SeriesPoint[]>>({})
   const [holdingDrawerMint, setHoldingDrawerMint] = useState<string>('')
@@ -3355,6 +3389,7 @@ function App() {
                   const tokenLabel = t ? ((t.symbol || t.name || '').trim() || shortPk(t.mint)) : shortPk(watchDrawerMint)
                   const addedAt = typeof t?.addedAt === 'number' ? t.addedAt : null
                   const mcAgeMs = typeof t?.mcUpdatedAt === 'number' ? Date.now() - t!.mcUpdatedAt! : null
+                  const quoteMcProxy = t ? computeQuoteMcProxy(t) : undefined
 
                   return (
                     <>
@@ -3422,6 +3457,15 @@ function App() {
                         <div className="holdingDrawerStat">
                           <div className="k">Current MC (feed)</div>
                           <div className="v mono">{formatUsd0(t?.currentMc)}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">MC proxy (quote)</div>
+                          <div
+                            className="v mono"
+                            title="Approx MC computed from quote proxy ratio (not from dequanW / DEXTools). Use as a direction signal only."
+                          >
+                            {typeof quoteMcProxy === 'number' && Number.isFinite(quoteMcProxy) ? `≈${formatUsd0(quoteMcProxy)}` : '—'}
+                          </div>
                         </div>
                         <div className="holdingDrawerStat">
                           <div className="k">MC growth</div>
@@ -3838,6 +3882,27 @@ function App() {
                     </div>
                   ) : null}
 
+                  <div
+                    className="note"
+                    style={{
+                      marginTop: '8px',
+                      marginBottom: '6px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      userSelect: 'none',
+                    }}
+                    title="Uses the quote proxy ratio to approximate market cap when the feed stops emitting MC for a mint"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={useQuoteMcProxyWhenStale}
+                      onChange={(e) => setUseQuoteMcProxyWhenStale(e.target.checked)}
+                      aria-label="Show quote-based MC proxy when feed MC is stale"
+                    />
+                    <span>Show quote-based MC proxy when feed MC is stale</span>
+                  </div>
+
                   <div style={{ paddingRight: '4px' }}>
                     <div className="watchHeaderRow watchHeaderRowWatching">
                       <div className="watchHeaderCell watchHeaderCellLeft">Token</div>
@@ -3864,6 +3929,8 @@ function App() {
                         const tokenLabel = (t.symbol || t.name || '').trim() || shortPk(t.mint)
                         const mcAgeMs = typeof t.mcUpdatedAt === 'number' ? Date.now() - t.mcUpdatedAt : null
                         const mcIsStale = typeof mcAgeMs === 'number' && mcAgeMs > 60_000
+                        const quoteMcProxy = mcIsStale && useQuoteMcProxyWhenStale ? computeQuoteMcProxy(t) : undefined
+                        const showQuoteProxy = typeof quoteMcProxy === 'number' && Number.isFinite(quoteMcProxy) && quoteMcProxy > 0
                         const series = watchingMcHistoryRef.current[t.mint] ?? []
                         const points = renderSparkline(series, 92, 26)
                         const trend = seriesTrend(series)
@@ -3926,14 +3993,20 @@ function App() {
                               className="watchCell watchCellCenter mono"
                               data-label="Current MC (feed)"
                               title={
-                                mcIsStale
-                                  ? `MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). MC only updates when this mint appears in the dequanW feed snapshot.`
-                                  : 'MC updates only when this mint appears in the dequanW feed snapshot.'
+                                showQuoteProxy
+                                  ? `Feed MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). Showing quote-based MC proxy instead.\n\nLast feed MC: ${formatUsd0(t.currentMc)}\nQuote MC proxy: ≈${formatUsd0(quoteMcProxy)}`
+                                  : mcIsStale
+                                    ? `MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). MC only updates when this mint appears in the dequanW feed snapshot.`
+                                    : 'MC updates only when this mint appears in the dequanW feed snapshot.'
                               }
                               style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
                             >
-                              <span>{formatUsd0(t.currentMc)}</span>
-                              {mcIsStale ? <span className="tokenRowBadge tokenRowBadgeWarm">STALE</span> : null}
+                              <span>{showQuoteProxy ? `≈${formatUsd0(quoteMcProxy)}` : formatUsd0(t.currentMc)}</span>
+                              {showQuoteProxy ? (
+                                <span className="tokenRowBadge tokenRowBadgeProxy">PROXY</span>
+                              ) : mcIsStale ? (
+                                <span className="tokenRowBadge tokenRowBadgeWarm">STALE</span>
+                              ) : null}
                             </div>
                             <div className="watchCell watchCellCenter" data-label="Chart">
                               <button
