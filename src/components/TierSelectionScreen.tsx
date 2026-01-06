@@ -6,6 +6,7 @@ interface TierSelectionScreenProps {
   onSelectTier: (tier: ProductTier) => void
   onSubscribeTier?: (tier: Extract<ProductTier, 'pro' | 'elite'>) => void
   busy?: boolean
+  onClose?: () => void
 }
 
 type TierConfig = {
@@ -67,7 +68,7 @@ const TIERS: TierConfig[] = [
   },
 ]
 
-export const TierSelectionScreen: React.FC<TierSelectionScreenProps> = ({ onSelectTier, onSubscribeTier, busy }) => {
+export const TierSelectionScreen: React.FC<TierSelectionScreenProps> = ({ onSelectTier, onSubscribeTier, busy, onClose }) => {
   const screenRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -96,6 +97,14 @@ export const TierSelectionScreen: React.FC<TierSelectionScreenProps> = ({ onSele
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.3 }}
       >
+        <div className="tierTopActions">
+          {onClose ? (
+            <button type="button" className="tierBackBtn" onClick={onClose}>
+              Back
+            </button>
+          ) : null}
+        </div>
+
         <div className="tierHeader">
           <h1 className="tierTitle">Choose Your Plan</h1>
           <p className="tierSubtitle">Start trading with the plan that fits your needs</p>

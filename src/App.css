@@ -1999,6 +1999,29 @@ button:disabled {
   width: 100%;
 }
 
+.tierTopActions {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: 14px;
+}
+
+.tierBackBtn {
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.86);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tierBackBtn:hover {
+  border-color: rgba(0, 255, 255, 0.35);
+  box-shadow: 0 0 18px rgba(0, 255, 255, 0.10);
+  transform: translateY(-1px);
+}
+
 .tierHeader {
   text-align: center;
   margin-bottom: 3rem;

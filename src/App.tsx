@@ -677,11 +677,9 @@ function App() {
   const [splashLeaving, setSplashLeaving] = useState(false)
   const [splashVideoFailed, setSplashVideoFailed] = useState(false)
 
-  const [tierSelectionOpen, setTierSelectionOpen] = useState(() => {
-    // Only force tier selection on first visit (or after clearing storage).
-      // Users can always re-open via the header plan selector.
-    return loadSetting('dequanswap.tierChosen', '0') !== '1'
-  })
+  // Do not force the tier selection screen on load; let users enter the app immediately.
+  // The screen can be opened via the "Upgrade Plan" button.
+  const [tierSelectionOpen, setTierSelectionOpen] = useState(false)
 
   const requestCloseSplash = useCallback(() => {
     setSplashLeaving((prev) => {
@@ -3257,7 +3255,12 @@ function App() {
       ) : null}
 
       {!splashOpen && tierSelectionOpen ? (
-        <TierSelectionScreen onSelectTier={handleSelectTier} onSubscribeTier={subscribeToTier} busy={subscriptionBusy} />
+        <TierSelectionScreen
+          onSelectTier={handleSelectTier}
+          onSubscribeTier={subscribeToTier}
+          busy={subscriptionBusy}
+          onClose={() => setTierSelectionOpen(false)}
+        />
       ) : null}
 
       {!splashOpen && !tierSelectionOpen ? (
@@ -3539,30 +3542,15 @@ function App() {
             </div>
           </div>
           <div className="tierControls">
-            <select
+            <button
+              type="button"
               className="select"
-              value={tier}
-              onChange={(e) => {
-                const nextTier = e.target.value as ProductTier
-                // Only allow selecting paid tiers if subscription is active.
-                const activePaidTier = subscriptionStatus?.active ? subscriptionStatus?.subscription?.tier : undefined
-                const canUsePaid = nextTier === 'free' || activePaidTier === nextTier || activePaidTier === 'elite'
-                if (!canUsePaid) {
-                  openTierSelection()
-                  return
-                }
-                setTier(nextTier)
-                saveTier(nextTier)
-                saveSetting('dequanswap.tierChosen', '1')
-              }}
-              aria-label="Plan"
+              onClick={openTierSelection}
+              aria-label="Upgrade plan"
+              title="Open subscription plans"
             >
-              {(['free', 'pro', 'elite'] as const).map((t) => (
-                <option key={t} value={t}>
-                  {tierDisplayName(t)}
-                </option>
-              ))}
-            </select>
+              Upgrade Plan
+            </button>
           </div>
         </div>
         <div className="tabsRight">
