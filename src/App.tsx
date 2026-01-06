@@ -937,6 +937,9 @@ function App() {
   const holdingsMcHistoryRef = useRef<Record<string, SeriesPoint[]>>({})
   const [holdingDrawerMint, setHoldingDrawerMint] = useState<string>('')
 
+  const watchingMcHistoryRef = useRef<Record<string, SeriesPoint[]>>({})
+  const [watchDrawerMint, setWatchDrawerMint] = useState<string>('')
+
   useEffect(() => {
     const id = window.setInterval(() => setUiNow(Date.now()), 2000)
     return () => window.clearInterval(id)
@@ -967,6 +970,30 @@ function App() {
       if (!keep.has(mint)) delete history[mint]
     }
   }, [holdings])
+
+  // Track a lightweight MC history per watched token for sparklines (bounded).
+  useEffect(() => {
+    const now = Date.now()
+    const history = watchingMcHistoryRef.current
+    const keep = new Set<string>()
+
+    for (const t of watched) {
+      keep.add(t.mint)
+      const mc = typeof t.currentMc === 'number' && Number.isFinite(t.currentMc) ? t.currentMc : undefined
+      if (typeof mc !== 'number') continue
+
+      const prev = history[t.mint] ?? []
+      const last = prev.length ? prev[prev.length - 1] : null
+      if (last && now - last.t < 3500) continue
+      if (last && last.v === mc) continue
+
+      history[t.mint] = clampSeriesPoints([...prev, { t: now, v: mc }], 60)
+    }
+
+    for (const mint of Object.keys(history)) {
+      if (!keep.has(mint)) delete history[mint]
+    }
+  }, [watched])
 
   const dequanwServerOk = useMemo(() => {
     const base = dequanwDashBase.trim()
@@ -1076,15 +1103,18 @@ function App() {
   )
 
   const closeHoldingDrawer = useCallback(() => setHoldingDrawerMint(''), [])
+  const closeWatchDrawer = useCallback(() => setWatchDrawerMint(''), [])
 
   useEffect(() => {
-    if (!holdingDrawerMint) return
+    if (!holdingDrawerMint && !watchDrawerMint) return
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeHoldingDrawer()
+      if (e.key !== 'Escape') return
+      if (holdingDrawerMint) closeHoldingDrawer()
+      if (watchDrawerMint) closeWatchDrawer()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [closeHoldingDrawer, holdingDrawerMint])
+  }, [closeHoldingDrawer, closeWatchDrawer, holdingDrawerMint, watchDrawerMint])
 
   const removeHolding = useCallback((mint: string) => {
     setHoldings((prev) => prev.filter((h) => h.mint !== mint))
@@ -3299,6 +3329,105 @@ function App() {
             </div>
           ) : null}
 
+          {watchDrawerMint ? (
+            <div
+              className="holdingDrawerOverlay"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Watched token details"
+              onClick={closeWatchDrawer}
+            >
+              <div className="holdingDrawer" onClick={(e) => e.stopPropagation()}>
+                {(() => {
+                  const t = watched.find((x) => x.mint === watchDrawerMint)
+                  const series = watchingMcHistoryRef.current[watchDrawerMint] ?? []
+                  const points = renderSparkline(series, 560, 160)
+                  const mcGrowth = t ? computeGrowthPct(t.entryMc, t.currentMc) : undefined
+                  const quoteGrowth = t && typeof t.growthPct === 'number' ? t.growthPct : undefined
+                  const tokenLabel = t ? ((t.symbol || t.name || '').trim() || shortPk(t.mint)) : shortPk(watchDrawerMint)
+                  const addedAt = typeof t?.addedAt === 'number' ? t.addedAt : null
+
+                  return (
+                    <>
+                      <div className="holdingDrawerHead">
+                        <div className="holdingDrawerTitle">
+                          {tokenLabel}
+                          <span className="holdingDrawerMint mono" title={watchDrawerMint}>
+                            {shortPk(watchDrawerMint)}
+                          </span>
+                        </div>
+                        <div className="holdingDrawerActions">
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(watchDrawerMint)
+                                setCopiedMint(watchDrawerMint)
+                                setTimeout(() => setCopiedMint(''), 2000)
+                              } catch {
+                                // ignore
+                              }
+                            }}
+                          >
+                            {copiedMint === watchDrawerMint ? 'Copied' : 'Copy mint'}
+                          </button>
+                          <button type="button" className="secondary" onClick={closeWatchDrawer}>
+                            Close
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="holdingDrawerChart">
+                        {points ? (
+                          <svg width="100%" height="160" viewBox="0 0 560 160" preserveAspectRatio="none">
+                            <polyline
+                              points={points}
+                              fill="none"
+                              stroke="rgba(45,226,230,0.9)"
+                              strokeWidth="2"
+                              strokeLinejoin="round"
+                              strokeLinecap="round"
+                            />
+                          </svg>
+                        ) : (
+                          <div className="holdingDrawerEmpty">No chart data yet.</div>
+                        )}
+                      </div>
+
+                      <div className="holdingDrawerGrid">
+                        <div className="holdingDrawerStat">
+                          <div className="k">Watch age</div>
+                          <div className="v mono">{addedAt ? formatAgeShort(Date.now() - addedAt) : '—'}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">Entry MC</div>
+                          <div className="v mono">{formatUsd0(t?.entryMc)}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">Current MC</div>
+                          <div className="v mono">{formatUsd0(t?.currentMc)}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">MC growth</div>
+                          <div className={typeof mcGrowth === 'number' && mcGrowth > 0 ? 'v mono pos' : typeof mcGrowth === 'number' && mcGrowth < 0 ? 'v mono neg' : 'v mono'}>
+                            {typeof mcGrowth === 'number' && Number.isFinite(mcGrowth) ? `${mcGrowth.toFixed(2)}%` : '—'}
+                          </div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">Quote growth</div>
+                          <div className={typeof quoteGrowth === 'number' && quoteGrowth > 0 ? 'v mono pos' : typeof quoteGrowth === 'number' && quoteGrowth < 0 ? 'v mono neg' : 'v mono'}>
+                            {typeof quoteGrowth === 'number' && Number.isFinite(quoteGrowth) ? `${quoteGrowth.toFixed(2)}%` : '—'}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )
+                })()}
+              </div>
+            </div>
+          ) : null}
+
           {walletActionHint ? (
         <div className="toast toastWarn" role="status" aria-live="polite">
           <div className="toastTitle">
@@ -3539,7 +3668,10 @@ function App() {
                               <button
                                 type="button"
                                 className="sparklineBtn"
-                                onClick={() => setHoldingDrawerMint(h.mint)}
+                                onClick={() => {
+                                  setWatchDrawerMint('')
+                                  setHoldingDrawerMint(h.mint)
+                                }}
                                 title="Open chart"
                               >
                                 {points ? (
@@ -3697,6 +3829,7 @@ function App() {
                       <div className="watchHeaderCell watchHeaderCellCenter">Age</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Entry MC</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Current MC</div>
+                      <div className="watchHeaderCell watchHeaderCellCenter">Chart</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Growth</div>
                       <div className="watchHeaderCell watchHeaderCellRight">Actions</div>
                     </div>
@@ -3709,6 +3842,9 @@ function App() {
                         const ruggedLabel = isTokenRugged({ error: t.error ?? null, isRugged: (t as any).isRugged ?? null, liquidityStatus: (t as any).liquidityStatus ?? null }) ? 'RUGGED' : ''
                         const ageMs = Date.now() - (typeof t.addedAt === 'number' ? t.addedAt : Date.now())
                         const tokenLabel = (t.symbol || t.name || '').trim() || shortPk(t.mint)
+                        const series = watchingMcHistoryRef.current[t.mint] ?? []
+                        const points = renderSparkline(series, 92, 26)
+                        const trend = seriesTrend(series)
                         return (
                           <div key={t.mint} className={isHot ? 'watchRow watchRowWatching watchRowHot' : 'watchRow watchRowWatching'}>
                             <div className="watchRowHeat" />
@@ -3765,6 +3901,38 @@ function App() {
                             <div className="watchCell watchCellCenter mono" data-label="Age">{formatAgeShort(ageMs)}</div>
                             <div className="watchCell watchCellCenter mono" data-label="Entry MC">{formatUsd0(t.entryMc)}</div>
                             <div className="watchCell watchCellCenter mono" data-label="Current MC">{formatUsd0(t.currentMc)}</div>
+                            <div className="watchCell watchCellCenter" data-label="Chart">
+                              <button
+                                type="button"
+                                className="sparklineBtn"
+                                onClick={() => {
+                                  setHoldingDrawerMint('')
+                                  setWatchDrawerMint(t.mint)
+                                }}
+                                title="Open chart"
+                              >
+                                {points ? (
+                                  <svg width="92" height="26" viewBox="0 0 92 26" preserveAspectRatio="none">
+                                    <polyline
+                                      points={points}
+                                      fill="none"
+                                      stroke={
+                                        trend === 'up'
+                                          ? 'rgba(0,255,163,0.9)'
+                                          : trend === 'down'
+                                            ? 'rgba(248,81,73,0.9)'
+                                            : 'rgba(234,242,255,0.6)'
+                                      }
+                                      strokeWidth="2"
+                                      strokeLinejoin="round"
+                                      strokeLinecap="round"
+                                    />
+                                  </svg>
+                                ) : (
+                                  <span className="sparklineEmpty">—</span>
+                                )}
+                              </button>
+                            </div>
                             <div
                               className={
                                 typeof growth === 'number' && growth > 0
