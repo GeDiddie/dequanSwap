@@ -28,8 +28,7 @@ Help system UX spec lives in: [HELP_SYSTEM.md](HELP_SYSTEM.md)
 
 **Capture checklist**:
 - Use a dedicated demo wallet.
-- Prefer **Paper mode** unless the clip is explicitly about Live fees/subscriptions.
-- If showing Live: use tiny amounts and blur Solscan.
+- Use tiny amounts and blur Solscan.
 - Keep browser zoom at 100%.
 
 **Naming**:
@@ -74,7 +73,6 @@ Script Structure (Hook → Action → Payoff → End Card)
 Safety notes:
 - Use only demo/test tokens (no real sensitive data)
 - Blur any addresses if they appear
-- Paper mode preferred
 
 ### 1) `tiers-scout-sniper-apex`
 - Title: “Pick a Plan in 10 Seconds”
@@ -123,21 +121,9 @@ Safety notes:
 - Where used: Anywhere fee breakdown is shown (pre-trade panel)
 - Hook (overlay): “Fees are transparent”
 - Show:
-	1) Toggle to Live
-	2) Point at fee breakdown line(s)
-	3) Quick zoom on fee percent (Scout 1%, Sniper 0.75%, Apex 0.5%)
+	1) Point at fee breakdown line(s)
+	2) Quick zoom on fee percent (Scout 1%, Sniper 0.75%, Apex 0.5%)
 - Key line (overlay): “Shown before you trade”
-
-### 6) `paper-vs-live`
-- Title: “Paper vs Live (One Toggle)”
-- Where used: Mode selector (Paper/Live)
-- Hook (overlay): “Practice first”
-- Show:
-	1) Toggle Paper → Live
-	2) Point at the UI label changing
-	3) Show a quick paper trade action (no wallet popup)
-- Key line (overlay): “Paper = safe training”
-- Notes: if showing tier gating, demonstrate Scout can still use Live but keep it high-level
 
 ### 7) `submitted-vs-confirmed`
 - Title: “Submitted vs Confirmed”

@@ -15,7 +15,7 @@ Review this checklist **before making any changes** and **before every deploymen
 ## Product North Star
 
 A beginner should be able to:
-1. Connect a wallet (or start in paper mode)
+1. Connect a wallet
 2. Watch new tokens in a live feed
 3. Understand *why* a token is interesting (simple growth + simple reasons)
 4. Buy / sell with one click
@@ -30,7 +30,7 @@ The UI should feel like:
 
 We avoid adding 50 toggles by mapping tiers to modes:
 
-- **Scout** → Observe + Manual Execute (+ Paper)
+- **Scout** → Observe + Manual Execute
 - **Sniper** → Faster execution (+ Fast Mode)
 - **Apex** → Strategy Lab (+ Fast Mode)
 
@@ -68,7 +68,6 @@ Each mode has its own UI surface area. Users only see the controls needed for th
 **Implemented**:
 - ✅ Tiered product (Scout/Sniper/Apex)
 - ✅ Live feed (kinetic vertical stream)
-- ✅ Paper trading mode
 - ✅ Live trading (Phantom signature)
 - ✅ Fast Mode arming/revoke (WSOL delegation)
 - ✅ Fast Mode BUYs (delegate-authority, no popup)

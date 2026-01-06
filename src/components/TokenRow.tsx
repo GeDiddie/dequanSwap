@@ -1,5 +1,6 @@
 import React, { useRef, useEffect } from 'react'
 import { motion } from 'framer-motion'
+import { isTokenRugged } from '../lib/rug'
 
 interface TokenRowProps {
   token: {
@@ -44,6 +45,7 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
   const prevGrowthRef = useRef(growth)
   const rowRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = React.useState(false)
+  const [ruggedClickedButton, setRuggedClickedButton] = React.useState<'load' | 'watch' | 'snipe' | null>(null)
   
   const heatWidth = Math.min(Math.max(growth, 0), 100)
   const isHot = growth > 50
@@ -70,10 +72,10 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
   const isDead = ageMs > 5 * 60 * 1000
   const isStale = !isDead && ageMs > 60 * 1000
 
-  const isRugged = token.isRugged === true || token.liquidityStatus === 'removed'
+  const isRugged = isTokenRugged(token)
   const badgeLabel = isRugged ? 'RUGGED' : isHot ? 'HOT' : isWarm ? 'WARM' : isCool ? 'COOL' : 'TRACK'
   const badgeClass = isRugged
-    ? 'tokenRowBadgeHot'
+    ? 'tokenRowBadgeRugged'
     : isHot
       ? 'tokenRowBadgeHot'
       : isWarm
@@ -81,6 +83,22 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
         : isCool
           ? 'tokenRowBadgeCool'
           : 'tokenRowBadgeTrack'
+
+  // Auto-remove rugged tokens from feed after 5 seconds
+  useEffect(() => {
+    if (isRugged) {
+      const timer = setTimeout(() => {
+        // Trigger exit animation by having parent remove this token
+        // The parent will handle actual removal from feed state
+        const row = rowRef.current
+        if (row) {
+          row.style.opacity = '0'
+          row.style.transform = 'translateX(-100px)'
+        }
+      }, 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [isRugged])
 
   const formatUsd = (n: number) => {
     try {
@@ -202,23 +220,41 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
       {/* ACTIONS */}
       <div className={`tokenRowActions ${isHovered ? 'tokenRowActionsOn' : ''}`}>
         <button
-          onClick={() => onLoad(token.mint)}
+          onClick={() => {
+            if (isRugged) {
+              setRuggedClickedButton('load')
+              return
+            }
+            onLoad(token.mint)
+          }}
           className="tokenRowBtn"
         >
-          Load
+          {ruggedClickedButton === 'load' ? 'RUGGED' : 'Load'}
         </button>
         <button
-          onClick={() => onWatch(token.mint)}
+          onClick={() => {
+            if (isRugged) {
+              setRuggedClickedButton('watch')
+              return
+            }
+            onWatch(token.mint)
+          }}
           className="tokenRowBtn"
         >
-          Watch
+          {ruggedClickedButton === 'watch' ? 'RUGGED' : 'Watch'}
         </button>
         <button
-          onClick={() => onSnipe(token.mint)}
-          disabled={disabled || isRugged}
+          onClick={() => {
+            if (isRugged) {
+              setRuggedClickedButton('snipe')
+              return
+            }
+            onSnipe(token.mint)
+          }}
+          disabled={disabled}
           className="tokenRowBtnPrimary"
         >
-          Snipe
+          {ruggedClickedButton === 'snipe' ? 'RUGGED' : 'Snipe'}
         </button>
       </div>
 

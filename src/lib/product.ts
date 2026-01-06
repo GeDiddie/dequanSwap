@@ -1,5 +1,4 @@
 export type ProductTier = 'free' | 'pro' | 'elite'
-export type TradeMode = 'paper' | 'live'
 
 export type TierGates = {
   allowLiveTrading: boolean
@@ -52,14 +51,4 @@ export function loadTier(): ProductTier {
 
 export function saveTier(tier: ProductTier) {
   saveSetting('dequanswap.tier', tier)
-}
-
-export function loadTradeMode(): TradeMode {
-  const raw = loadSetting('dequanswap.tradeMode', 'paper')
-  if (raw === 'paper' || raw === 'live') return raw
-  return 'paper'
-}
-
-export function saveTradeMode(mode: TradeMode) {
-  saveSetting('dequanswap.tradeMode', mode)
 }

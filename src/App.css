@@ -234,6 +234,36 @@ body::before {
   animation: shake 0.2s ease-in-out;
 }
 
+.flipCard {
+  perspective: 1200px;
+}
+
+.flipCardInner {
+  display: grid;
+  transform-style: preserve-3d;
+  transition: transform 420ms ease;
+}
+
+.flipCard.isFlipped .flipCardInner {
+  transform: rotateY(180deg);
+}
+
+.flipCardFace {
+  grid-area: 1 / 1;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.flipCardBack {
+  transform: rotateY(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flipCardInner {
+    transition: none;
+  }
+}
+
 /* ========================================
    LEGIBILITY & VISUAL DEPTH OVERHAUL
    ======================================== */
@@ -1192,6 +1222,20 @@ body::before {
   letter-spacing: 0.2px;
 }
 
+.panelTitleButton {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
 .panelHead {
   display: flex;
   flex-direction: column;
@@ -1294,6 +1338,9 @@ input {
   padding: 10px 12px;
   color: var(--text);
   outline: none;
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
 }
 
 input:focus {
@@ -1305,10 +1352,12 @@ input:focus {
   display: flex;
   gap: 10px;
   align-items: center;
+  min-width: 0;
 }
 
 .inline > input {
   flex: 1;
+  min-width: 0;
 }
 
 .quick {
@@ -1389,6 +1438,17 @@ button:disabled {
 
 .primary:hover:not(:disabled) {
   box-shadow: 0 0 20px rgba(0, 255, 127, 0.6), 3px 3px 6px #05070a;
+}
+
+.primary.danger {
+  background: linear-gradient(145deg, var(--neon-red), #d72f2f);
+  border-color: var(--neon-red);
+  color: #0b0f14;
+  box-shadow: 0 0 15px rgba(248, 81, 73, 0.35), 3px 3px 6px #05070a;
+}
+
+.primary.danger:hover:not(:disabled) {
+  box-shadow: 0 0 20px rgba(248, 81, 73, 0.55), 3px 3px 6px #05070a;
 }
 
 .secondary {

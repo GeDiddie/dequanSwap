@@ -24,7 +24,6 @@ const TIERS: TierConfig[] = [
     features: [
       'Watch up to 5 tokens',
       'Track up to 5 positions',
-      'Paper + Live trading',
       'Live feed (last 5 tokens)',
       '1% fee per trade',
       'Community support',
@@ -39,7 +38,7 @@ const TIERS: TierConfig[] = [
     features: [
       'Watch up to 20 tokens',
       'Track up to 20 positions',
-      'Paper + Live trading',
+      'Live trading',
       'Live feed (last 30 tokens)',
       'Full PnL statements',
       '0.75% fee per trade',

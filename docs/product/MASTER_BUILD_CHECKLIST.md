@@ -7,7 +7,7 @@ This is the always-on checklist we use to prevent losing track of MVP vs later w
 ## A) Every Change (no exceptions)
 - [ ] `npm run build` passes.
 - [ ] UI smoke: load https://snipe.dequan.xyz, confirm feed renders, confirm WS status changes.
-- [ ] Trading smoke (paper): load token → paper buy/sell works.
+- [ ] Trading smoke (live): small buy → confirm signature receipt → confirm holdings update → small sell.
 - [ ] Live trading safety: ensure live trading remains gated by tier and explicit user choice.
 - [ ] Tiered auth E2E: confirm **Free = wallet-only** and **Paid = account-required** (see [Tiered Auth E2E Checklist](../../../jul2025/dequanW/docs/public-backend/TIERED_AUTH_E2E_CHECKLIST.md)).
 - [ ] For any new user-facing feature: add a tiny `?` help icon that plays a short explainer video on hover (or click on mobile).
@@ -37,7 +37,6 @@ This is the always-on checklist we use to prevent losing track of MVP vs later w
 ### Core
 - [ ] Stable feed + WS connection with backpressure protections.
 - [ ] Minimalist view remains fast and readable under load.
-- [ ] Paper trading baseline.
 - [ ] Live trading via Phantom signing (explicit per trade).
 
 ### Holdings Experience (Minimalist live)

@@ -9,8 +9,7 @@ Single screen, 3 main sections:
 1) **KPI strip**
 - Watching now
 - Alerts triggered (session)
-- Paper PnL (if paper)
-- Live PnL (if live)
+- Live PnL
 - Engine status (green/yellow/red)
 
 2) **Live Feed (Evaluations)**
@@ -26,7 +25,7 @@ Columns (v0):
 
 3) **Watching / Positions**
 - Watching: shows tokens being tracked now
-- Positions: shows paper/live positions with quick sells
+- Positions: shows holdings with quick sells
 
 ## Token drawer (row click)
 Right-side drawer:
@@ -37,7 +36,6 @@ Right-side drawer:
 ## Minimal settings (top bar)
 Keep this tiny:
 - Trade size (quick buttons)
-- Mode: Paper / Live (tier-gated)
 - Slippage: hidden in Advanced dropdown
 
 ## Growth % definition (v0)
@@ -56,4 +54,4 @@ This works for relative change even if token decimals are unknown, because decim
 ## Safety rails (minimalist)
 - Default 1 open live position (configurable later)
 - Default max spend/trade
-- Confirmations only when switching Paper → Live
+- Confirmations run in the background and are bounded by timeouts (no infinite “confirming”).

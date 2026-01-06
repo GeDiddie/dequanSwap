@@ -3,13 +3,13 @@
 This is the official tier definition for the dequanSwap user-facing product.
 
 ## Tier 0: Scout (Free)
-**Goal:** let anyone learn the system risk-free.
+**Goal:** let anyone learn the system with clear, conservative defaults.
 
 **Identity requirement:** wallet-only (no email/account required)
 
 **Core experience:**
 - Live discovery + watch feed
-- Paper positions and paper PnL
+- Manual buy/sell with transparent fees (tier-gated)
 - Simple “why pass/skip” explanations
 - Tip jar / supporter badge
 
@@ -18,7 +18,7 @@ This is the official tier definition for the dequanSwap user-facing product.
 - Reduced retention (e.g., last N events only)
 - Presets only (no advanced tuning)
 
-Scout can use Paper or Live trading, but with tighter limits.
+Scout can access Live trading only when permitted by the tier gates.
 
 ## Tier 1: Sniper (Pro)
 **Goal:** faster execution + higher limits.
@@ -49,6 +49,6 @@ Scout can use Paper or Live trading, but with tighter limits.
 ---
 
 ## Tier-to-Mode mapping (UI)
-- Scout → **Observe + Manual Execute (+ Paper)**
+- Scout → **Observe + Manual Execute**
 - Sniper → **Faster execution (+ Fast Mode)**
 - Apex → **Strategy Lab (+ Fast Mode)**

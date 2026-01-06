@@ -9,7 +9,7 @@ These are the rules for implementing tiered UX and trading features safely.
 
 ## State management
 - Prefer React local state + small helper modules.
-- Persist only what improves UX (tier selection, mode, trade size, watchlist) via localStorage.
+- Persist only what improves UX (tier selection, trade size, watchlist) via localStorage.
 
 ## Safety / security
 - Never ship long-lived secrets to the browser.
@@ -18,7 +18,6 @@ These are the rules for implementing tiered UX and trading features safely.
   - max open positions
   - slippage clamps
   - rate limits
-- UI must clearly distinguish **Paper** vs **Live**.
 
 ## Data & performance
 - Polling is acceptable in v0, but must be tier-limited.

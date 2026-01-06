@@ -21,28 +21,15 @@ import {
 } from './lib/controlPlaneAuth'
 import {
   type ProductTier,
-  type TradeMode,
   gatesForTier,
   loadSetting,
   loadTier,
-  loadTradeMode,
   saveSetting,
   saveTier,
-  saveTradeMode,
   tierDisplayName,
 } from './lib/product'
-import {
-  PRICE_PROXY_SCALE,
-  bigintFromString,
-  clampTrades,
-  computePriceProxyScaled,
-  loadPaperState,
-  newTradeId,
-  savePaperState,
-  type PaperPosition,
-  type PaperState,
-  type PaperTrade,
-} from './lib/paperTrading'
+import { PRICE_PROXY_SCALE, bigintFromString, computePriceProxyScaled } from './lib/priceProxy'
+import { isJupiterNoRouteErrorMessage, isTokenRugged } from './lib/rug'
 import {
   SOL_MINT,
   getSolBalanceLamports,
@@ -218,11 +205,6 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
 }
 
-function isJupiterNoRouteErrorMessage(raw: string) {
-  if (!raw) return false
-  return raw.includes('COULD_NOT_FIND_ANY_ROUTE') || raw.includes('Could not find any route')
-}
-
 async function confirmSignatureWithFallback(
   connection: Connection,
   signature: string,
@@ -231,13 +213,29 @@ async function confirmSignatureWithFallback(
     timeoutMs?: number
     pollIntervalMs?: number
   },
-): Promise<'confirmed' | 'timeout'> {
+): Promise<'confirmed' | 'timeout' | 'not_found'> {
   const commitment = opts?.commitment || 'confirmed'
   const timeoutMs = typeof opts?.timeoutMs === 'number' ? opts.timeoutMs : 90_000
   const pollIntervalMs = typeof opts?.pollIntervalMs === 'number' ? opts.pollIntervalMs : 1500
 
+  const withTimeout = async <T,>(p: Promise<T>, ms: number): Promise<T> => {
+    let id: number | undefined
+    try {
+      return await Promise.race([
+        p,
+        new Promise<T>((_, reject) => {
+          id = window.setTimeout(() => reject(new Error('timeout')), ms)
+        }),
+      ])
+    } finally {
+      if (typeof id === 'number') window.clearTimeout(id)
+    }
+  }
+
   try {
-    await connection.confirmTransaction(signature, commitment)
+    // confirmTransaction can hang indefinitely when WS subscriptions are unhealthy.
+    // Use a short leash, then fall back to polling.
+    await withTimeout(connection.confirmTransaction(signature, commitment), Math.min(8000, timeoutMs))
     return 'confirmed'
   } catch (e) {
     // Fall through to polling.
@@ -247,17 +245,20 @@ async function confirmSignatureWithFallback(
   }
 
   const started = Date.now()
+  let everObservedStatus = false
   while (Date.now() - started < timeoutMs) {
     const st = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true }).catch(() => null)
     const s = st?.value?.[0]
     if (s) {
+      everObservedStatus = true
       if (s.err) throw new Error(`Transaction failed: ${JSON.stringify(s.err)}`)
       if (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized') return 'confirmed'
     }
     await new Promise<void>((r) => setTimeout(r, pollIntervalMs))
   }
 
-  return 'timeout'
+  // If we never saw the signature in status history, treat it as dropped / never broadcast.
+  return everObservedStatus ? 'timeout' : 'not_found'
 }
 
 function shortPk(pk: string) {
@@ -361,8 +362,23 @@ type WatchedToken = {
 type HoldingToken = {
   mint: string
   boughtAt: number
+  name?: string
+  symbol?: string
+  isRugged?: boolean
+  liquidityStatus?: 'active' | 'removed' | 'unknown'
+  error?: string
   buyMc?: number
   currentMc?: number
+}
+
+type SoldToken = {
+  mint: string
+  soldAt: number
+  outcome?: 'SOLD' | 'RUGGED'
+  pct?: number
+  signature?: string
+  buyMc?: number
+  sellMc?: number
 }
 
 function parseWatchedTokens(raw: string | null): WatchedToken[] {
@@ -409,11 +425,42 @@ function parseHoldings(raw: string | null): HoldingToken[] {
         const boughtAt = typeof r.boughtAt === 'number' ? r.boughtAt : Date.now()
         if (!mint) return null
         const h: HoldingToken = { mint, boughtAt }
+        if (typeof r.name === 'string') h.name = r.name
+        if (typeof r.symbol === 'string') h.symbol = r.symbol
+        if (typeof r.isRugged === 'boolean') h.isRugged = r.isRugged
+        if (r.liquidityStatus === 'active' || r.liquidityStatus === 'removed' || r.liquidityStatus === 'unknown') h.liquidityStatus = r.liquidityStatus
+        if (typeof r.error === 'string') h.error = r.error
         if (typeof r.buyMc === 'number') h.buyMc = r.buyMc
         if (typeof r.currentMc === 'number') h.currentMc = r.currentMc
         return h
       })
       .filter(Boolean) as HoldingToken[]
+  } catch {
+    return []
+  }
+}
+
+function parseSoldTokens(raw: string | null): SoldToken[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((x) => {
+        if (!x || typeof x !== 'object') return null
+        const r = x as Record<string, unknown>
+        const mint = typeof r.mint === 'string' ? r.mint : ''
+        const soldAt = typeof r.soldAt === 'number' ? r.soldAt : Date.now()
+        if (!mint) return null
+        const s: SoldToken = { mint, soldAt }
+        if (r.outcome === 'SOLD' || r.outcome === 'RUGGED') s.outcome = r.outcome
+        if (typeof r.pct === 'number') s.pct = r.pct
+        if (typeof r.signature === 'string') s.signature = r.signature
+        if (typeof r.buyMc === 'number') s.buyMc = r.buyMc
+        if (typeof r.sellMc === 'number') s.sellMc = r.sellMc
+        return s
+      })
+      .filter(Boolean) as SoldToken[]
   } catch {
     return []
   }
@@ -536,7 +583,6 @@ function App() {
   }, [defaultWsUrl, wsUrl])
 
   const [tier, setTier] = useState<ProductTier>(() => loadTier())
-  const [tradeMode, setTradeMode] = useState<TradeMode>(() => loadTradeMode())
   const gates = useMemo(() => gatesForTier(tier), [tier])
 
   const [subscriptionBusy, setSubscriptionBusy] = useState(false)
@@ -761,12 +807,17 @@ function App() {
   const [amountSol, setAmountSol] = useState('0.01')
   const [slippageBps, setSlippageBps] = useState(4000)
 
+  const [snipeCardSide, setSnipeCardSide] = useState<'snipe' | 'sell'>('snipe')
+  const [sellMintInput, setSellMintInput] = useState('')
+  const [sellPct, setSellPct] = useState<25 | 50 | 100>(100)
+
   const [watchMintInput, setWatchMintInput] = useState('')
   const [watched, setWatched] = useState<WatchedToken[]>(() =>
     parseWatchedTokens(localStorage.getItem('dequanswap.watchedTokens')),
   )
 
   const [holdings, setHoldings] = useState<HoldingToken[]>([])
+  const [soldTokens, setSoldTokens] = useState<SoldToken[]>([])
 
   const defaultDequanwDashBase = import.meta.env.VITE_DEQUANW_DASH_BASE || '/dequanw'
   const dequanwDashBase = defaultDequanwDashBase
@@ -809,6 +860,23 @@ function App() {
     return feedNewestAgeMs > 15 * 60 * 1000
   }, [feedNewestAgeMs])
 
+  // Auto-remove rugged tokens from feed after 5 seconds
+  useEffect(() => {
+    const ruggedTokens = feed.filter((t) => isTokenRugged(t))
+    
+    if (ruggedTokens.length === 0) return
+    
+    const timers = ruggedTokens.map(token => {
+      return setTimeout(() => {
+        setFeed(prev => prev.filter(t => t.mint !== token.mint))
+      }, 5000)
+    })
+    
+    return () => {
+      timers.forEach(timer => clearTimeout(timer))
+    }
+  }, [feed])
+
   const [debugIncludeRugged, setDebugIncludeRugged] = useState<boolean>(() =>
     loadSetting('dequanswap.debugIncludeRugged', '0') === '1',
   )
@@ -817,11 +885,19 @@ function App() {
   const [liveFeedOpen, setLiveFeedOpen] = useState(true)
   const [watchingAddOpen, setWatchingAddOpen] = useState(false)
   const [holdingsOpen, setHoldingsOpen] = useState(true)
+  const [copiedMint, setCopiedMint] = useState<string>('')
 
   // Auto-collapse Holdings when empty, expand when populated
   useEffect(() => {
     setHoldingsOpen(holdings.length > 0)
   }, [holdings.length])
+
+  // Auto-expand Watching when first token is added
+  useEffect(() => {
+    if (watched.length === 1) {
+      setWatchingOpen(true)
+    }
+  }, [watched.length])
 
   const tierLabel = useMemo(() => {
     return tierDisplayName(tier)
@@ -830,12 +906,23 @@ function App() {
   const dashboardSubtitle = useMemo(() => `${tierLabel} Dashboard`, [tierLabel])
 
   const getFeedMcSnapshot = useCallback(
-    (mint: string): { entry?: number; current?: number } => {
+    (mint: string): {
+      entry?: number
+      current?: number
+      name?: string
+      symbol?: string
+      isRugged?: boolean
+      liquidityStatus?: 'active' | 'removed' | 'unknown'
+    } => {
       const t = feed.find((x) => x.mint === mint)
       if (!t) return {}
       const entry = typeof t.mcEntry === 'number' ? t.mcEntry : typeof t.detectedMc === 'number' ? t.detectedMc : undefined
       const current = typeof t.mcCurrent === 'number' ? t.mcCurrent : typeof t.detectedMc === 'number' ? t.detectedMc : undefined
-      return { entry, current }
+      const name = typeof t.name === 'string' && t.name.trim() ? t.name.trim() : undefined
+      const symbol = typeof t.symbol === 'string' && t.symbol.trim() ? t.symbol.trim() : undefined
+      const isRugged = t.isRugged === true
+      const liquidityStatus = t.liquidityStatus
+      return { entry, current, name, symbol, isRugged, liquidityStatus }
     },
     [feed],
   )
@@ -852,10 +939,32 @@ function App() {
         const existing = prev.find((h) => h.mint === m)
         if (existing) {
           return prev.map((h) =>
-            h.mint === m ? { ...h, buyMc: h.buyMc ?? buyMc, currentMc: snap.current ?? h.currentMc } : h,
+            h.mint === m
+              ? {
+                  ...h,
+                  name: h.name ?? snap.name,
+                  symbol: h.symbol ?? snap.symbol,
+                  isRugged: h.isRugged ?? snap.isRugged,
+                  liquidityStatus: h.liquidityStatus ?? snap.liquidityStatus,
+                  buyMc: h.buyMc ?? buyMc,
+                  currentMc: snap.current ?? h.currentMc,
+                }
+              : h,
           )
         }
-        return [{ mint: m, boughtAt: Date.now(), buyMc, currentMc: snap.current }, ...prev]
+        return [
+          {
+            mint: m,
+            boughtAt: Date.now(),
+            name: snap.name,
+            symbol: snap.symbol,
+            isRugged: snap.isRugged,
+            liquidityStatus: snap.liquidityStatus,
+            buyMc,
+            currentMc: snap.current,
+          },
+          ...prev,
+        ]
       })
 
       // Mirror dequanW bot behavior: once bought, stop monitoring it.
@@ -878,6 +987,17 @@ function App() {
       // ignore
     }
   }, [holdings, publicKey])
+
+  useEffect(() => {
+    try {
+      if (publicKey) {
+        const wallet = publicKey.toBase58()
+        localStorage.setItem(`dequanswap.soldTokens.${wallet}`, JSON.stringify(soldTokens))
+      }
+    } catch {
+      // ignore
+    }
+  }, [publicKey, soldTokens])
 
   const primeWatchedFromFeed = useCallback(
     (mint: string) => {
@@ -941,9 +1061,6 @@ function App() {
   })
   const [, setTriggeredCount] = useState(0)
   const triggeredSetRef = useRef<Set<string>>(new Set())
-
-  const [paper, setPaper] = useState<PaperState>(() => loadPaperState())
-
   const [fastModeCapSol, setFastModeCapSol] = useState('0.25')
   const [fastModeStatus, setFastModeStatus] = useState<'disarmed' | 'arming' | 'armed' | 'revoking'>('disarmed')
   const [fastModeError, setFastModeError] = useState<string>('')
@@ -962,12 +1079,16 @@ function App() {
   const [error, setError] = useState<string>('')
   const [snipePrompt, setSnipePrompt] = useState<string>('')
   const [txSig, setTxSig] = useState<string>('')
+  const [sellStep, setSellStep] = useState<UiStep>('idle')
+  const [sellMintInFlight, setSellMintInFlight] = useState<string>('')
+  const [sellSig, setSellSig] = useState<string>('')
+  const [sellError, setSellError] = useState<string>('')
   const [bgTx, setBgTx] = useState<
     | {
         sig: string
         startedAt: number
         finishedAt?: number
-        status: 'confirming' | 'confirmed' | 'timeout' | 'failed'
+        status: 'confirming' | 'confirmed' | 'timeout' | 'not_found' | 'failed'
         error?: string
       }
     | null
@@ -1028,14 +1149,12 @@ function App() {
   }, [gates.allowFastMode, useBotWalletForTrades])
 
   const activeTraderPubkey = useMemo(() => {
-    if (tradeMode !== 'live') return publicKey
     return activeLiveKeypair ? activeLiveKeypair.publicKey : publicKey
-  }, [activeLiveKeypair, publicKey, tradeMode])
+  }, [activeLiveKeypair, publicKey])
 
   const enableFastMode = useCallback(async () => {
     setFastModeError('')
     if (!gates.allowFastMode) return setFastModeError('Fast Mode is locked on this tier')
-    if (tradeMode !== 'live') return setFastModeError('Fast Mode requires Live mode')
     if (!publicKey) return setFastModeError('Connect wallet first')
     if (!signTransaction) return setFastModeError('Wallet does not support transaction signing')
     if (fastModeStatus !== 'disarmed') return
@@ -1082,7 +1201,7 @@ function App() {
       setFastModeStatus('disarmed')
       setFastModeError(e instanceof Error ? e.message : 'Failed to enable Fast Mode')
     }
-  }, [connection, fastModeCapSol, fastModeStatus, gates.allowFastMode, publicKey, signTransaction, tradeMode])
+  }, [connection, fastModeCapSol, fastModeStatus, gates.allowFastMode, publicKey, signTransaction])
 
   const revokeFastMode = useCallback(async () => {
     setFastModeError('')
@@ -1137,19 +1256,7 @@ function App() {
   useEffect(() => saveSetting('dequanswap.authToken', authToken), [authToken])
   useEffect(() => saveSetting('dequanswap.dequanwDashBase', dequanwDashBase), [dequanwDashBase])
   useEffect(() => saveTier(tier), [tier])
-  useEffect(() => saveTradeMode(tradeMode), [tradeMode])
   useEffect(() => saveSetting('dequanswap.growthTriggerPct', String(growthTriggerPct)), [growthTriggerPct])
-
-  useEffect(() => {
-    savePaperState(paper)
-  }, [paper])
-
-  useEffect(() => {
-    // Hard gate: free tier cannot be in live mode.
-    if (!gates.allowLiveTrading && tradeMode === 'live') {
-      setTradeMode('paper')
-    }
-  }, [gates.allowLiveTrading, tradeMode])
 
   useEffect(() => {
     localStorage.setItem('dequanswap.watchedTokens', JSON.stringify(watched))
@@ -1232,6 +1339,22 @@ function App() {
       }
     } else {
       setHoldings([])
+    }
+  }, [publicKey])
+
+  useEffect(() => {
+    // Load wallet-specific sold tokens when wallet connects or changes
+    if (publicKey) {
+      const wallet = publicKey.toBase58()
+      try {
+        const stored = localStorage.getItem(`dequanswap.soldTokens.${wallet}`)
+        const parsed = parseSoldTokens(stored)
+        setSoldTokens(parsed)
+      } catch {
+        setSoldTokens([])
+      }
+    } else {
+      setSoldTokens([])
     }
   }, [publicKey])
 
@@ -1568,6 +1691,8 @@ function App() {
         return
       }
 
+      const wasEmpty = watched.length === 0
+
       setWatched((prev) => {
         if (prev.find((t) => t.mint === m)) return prev
         if (prev.length >= gates.maxWatchedTokens) {
@@ -1580,6 +1705,11 @@ function App() {
       // Remove from feed once added to watching (mirror buy -> holdings behavior)
       setFeed((prev) => prev.filter((t) => t.mint !== m))
 
+      // Auto-expand watching section if it was empty
+      if (wasEmpty) {
+        setWatchingOpen(true)
+      }
+
       // Prime MC/Growth immediately from current feed snapshot (if present).
       primeWatchedFromFeed(m)
 
@@ -1588,7 +1718,7 @@ function App() {
       window.setTimeout(() => void quoteWatchedMint(m), 650)
       window.setTimeout(() => void quoteWatchedMint(m), 1500)
     },
-    [gates.maxWatchedTokens, primeWatchedFromFeed, quoteWatchedMint],
+    [gates.maxWatchedTokens, primeWatchedFromFeed, quoteWatchedMint, watched.length],
   )
 
   useEffect(() => {
@@ -1641,8 +1771,27 @@ function App() {
       prev.map((h) => {
         const snap = getFeedMcSnapshot(h.mint)
         const nextCurrent = snap.current ?? h.currentMc
-        if (nextCurrent === h.currentMc) return h
-        return { ...h, currentMc: nextCurrent }
+        const nextName = h.name ?? snap.name
+        const nextSymbol = h.symbol ?? snap.symbol
+        const nextIsRugged = h.isRugged ?? snap.isRugged
+        const nextLiquidityStatus = h.liquidityStatus ?? snap.liquidityStatus
+
+        const changed =
+          nextCurrent !== h.currentMc ||
+          nextName !== h.name ||
+          nextSymbol !== h.symbol ||
+          nextIsRugged !== h.isRugged ||
+          nextLiquidityStatus !== h.liquidityStatus
+        if (!changed) return h
+
+        return {
+          ...h,
+          currentMc: nextCurrent,
+          name: nextName,
+          symbol: nextSymbol,
+          isRugged: nextIsRugged,
+          liquidityStatus: nextLiquidityStatus,
+        }
       }),
     )
   }, [feed, getFeedMcSnapshot])
@@ -1798,170 +1947,6 @@ function App() {
     }
   }, [growthTriggerPct, watched])
 
-  const getWatchedPriceProxyScaled = useCallback(
-    async (mint: string): Promise<bigint> => {
-      const w = watched.find((x) => x.mint === mint)
-      if (w?.lastPriceProxyScaled) return bigintFromString(w.lastPriceProxyScaled)
-
-      if (!publicKey) throw new Error('Connect wallet first')
-      const ws = await ensureWs()
-      const amountInLamports = toLamports(Number(amountSol))
-      if (amountInLamports <= 0) throw new Error('Enter a valid SOL amount')
-
-      const quote = await ws.request<QuoteResult>(
-        {
-          type: 'quote',
-          params: {
-            userPubkey: publicKey.toBase58(),
-            inputMint: SOL_MINT,
-            outputMint: mint,
-            amountIn: amountInLamports.toString(),
-            slippageBps: clamp(slippageBps, 0, 50_000),
-          },
-        },
-        (m): m is QuoteResult => m.type === 'quote_result',
-        12_000,
-      )
-
-      if (!quote.success || !quote.data?.amountOut || !quote.data?.amountIn) throw new Error('Quote failed')
-      return computePriceProxyScaled(BigInt(quote.data.amountIn), BigInt(quote.data.amountOut))
-    },
-    [amountSol, ensureWs, publicKey, slippageBps, watched],
-  )
-
-  const paperBuyMint = useCallback(
-    async (mint: string) => {
-      setError('')
-      setTxSig('')
-
-      if (!publicKey) return setError('Connect wallet first')
-
-      try {
-        const sol = Number(amountSol)
-        if (!Number.isFinite(sol) || sol <= 0) throw new Error('Enter a valid SOL amount')
-        const amountInLamports = toLamports(sol)
-
-        const ws = await ensureWs()
-        setStep('quoting')
-        const quote = await ws.request<QuoteResult>(
-          {
-            type: 'quote',
-            params: {
-              userPubkey: publicKey.toBase58(),
-              inputMint: SOL_MINT,
-              outputMint: mint,
-              amountIn: amountInLamports.toString(),
-              slippageBps: clamp(slippageBps, 0, 50_000),
-            },
-          },
-          (m): m is QuoteResult => m.type === 'quote_result',
-        )
-        if (!quote.success || !quote.data?.amountOut || !quote.data?.amountIn) throw new Error('Quote failed')
-
-        const out = BigInt(quote.data.amountOut)
-        const inLamports = BigInt(quote.data.amountIn)
-        const priceProxyScaled = computePriceProxyScaled(inLamports, out)
-
-        setPaper((prev) => {
-          const solBal = bigintFromString(prev.solLamports)
-          if (solBal < inLamports) throw new Error('Paper wallet: insufficient SOL')
-
-          const pos: PaperPosition = {
-            mint,
-            openedAt: Date.now(),
-            amountInLamports: inLamports.toString(),
-            tokenAmountBaseUnits: out.toString(),
-            entryPriceProxyScaled: priceProxyScaled.toString(),
-            lastPriceProxyScaled: priceProxyScaled.toString(),
-          }
-
-          const trade: PaperTrade = {
-            id: newTradeId(),
-            ts: Date.now(),
-            side: 'buy',
-            mint,
-            solLamportsDelta: (-inLamports).toString(),
-            tokenBaseUnitsDelta: out.toString(),
-          }
-
-          return {
-            solLamports: (solBal - inLamports).toString(),
-            positions: [pos, ...prev.positions],
-            trades: clampTrades([trade, ...prev.trades]),
-          }
-        })
-
-        addHolding(mint)
-
-        setStep('done')
-        setTimeout(() => setStep('idle'), 500)
-      } catch (e) {
-        setStep('idle')
-        setError(e instanceof Error ? e.message : 'Paper buy failed')
-      }
-    },
-    [addHolding, amountSol, ensureWs, publicKey, slippageBps],
-  )
-
-  const paperSellMint = useCallback(
-    async (mint: string, pct: 25 | 50 | 100) => {
-      setError('')
-      setTxSig('')
-
-      try {
-        const priceProxyScaled = await getWatchedPriceProxyScaled(mint)
-        setPaper((prev) => {
-          const idx = prev.positions.findIndex((p) => p.mint === mint)
-          if (idx === -1) throw new Error('Paper wallet: no position')
-          const pos = prev.positions[idx]
-
-          const tokenAmt = bigintFromString(pos.tokenAmountBaseUnits)
-          if (tokenAmt <= 0n) throw new Error('Paper wallet: empty position')
-
-          const sellAmt = (tokenAmt * BigInt(pct)) / 100n
-          if (sellAmt <= 0n) throw new Error('Sell amount too small')
-
-          const solDelta = (sellAmt * priceProxyScaled) / PRICE_PROXY_SCALE
-
-          const newTokenAmt = tokenAmt - sellAmt
-          const newPos: PaperPosition | null =
-            newTokenAmt > 0n
-              ? {
-                  ...pos,
-                  tokenAmountBaseUnits: newTokenAmt.toString(),
-                  lastPriceProxyScaled: priceProxyScaled.toString(),
-                }
-              : null
-
-          const nextPositions = [...prev.positions]
-          if (newPos) nextPositions[idx] = newPos
-          else nextPositions.splice(idx, 1)
-
-          const solBal = bigintFromString(prev.solLamports)
-
-          const trade: PaperTrade = {
-            id: newTradeId(),
-            ts: Date.now(),
-            side: 'sell',
-            mint,
-            pct,
-            solLamportsDelta: solDelta.toString(),
-            tokenBaseUnitsDelta: (-sellAmt).toString(),
-          }
-
-          return {
-            solLamports: (solBal + solDelta).toString(),
-            positions: nextPositions,
-            trades: clampTrades([trade, ...prev.trades]),
-          }
-        })
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Paper sell failed')
-      }
-    },
-    [getWatchedPriceProxyScaled],
-  )
-
   useEffect(() => {
     const id = setInterval(() => {
       void pollQuotes()
@@ -2000,15 +1985,7 @@ function App() {
     setSnipePrompt('')
     setTxSig('')
 
-    if (tradeMode === 'paper') {
-      if (!gates.allowLiveTrading) {
-        return setError(`Snipe requires Live trading — upgrade to enable Live mode (current plan: ${tierDisplayName(tier)})`)
-      }
-      return setError('Cannot snipe in Paper mode — switch to Live mode')
-    }
-
     if (!gates.allowLiveTrading) {
-      setTradeMode('paper')
       return setError(`Live trading is locked on this plan — upgrade to snipe (current plan: ${tierDisplayName(tier)})`)
     }
 
@@ -2139,6 +2116,16 @@ function App() {
               pollIntervalMs: 1000,
             })
 
+            if (status === 'not_found') {
+              setBgTx((prev) =>
+                prev && prev.sig === signature
+                  ? { ...prev, status: 'not_found', finishedAt: Date.now(), error: 'Signature not found on chain (dropped?)' }
+                  : prev,
+              )
+              pushDebugEvent({ area: 'trade', level: 'warn', message: 'Bg confirm not found', detail: signature })
+              return
+            }
+
             if (status === 'timeout') {
               setBgTx((prev) =>
                 prev && prev.sig === signature ? { ...prev, status: 'timeout', finishedAt: Date.now() } : prev,
@@ -2264,7 +2251,6 @@ function App() {
     fastModeStatus,
     gates.allowLiveTrading,
     isUserRateLimitedError,
-    paperBuyMint,
     publicKey,
     recordTradingApiError,
     refreshBalances,
@@ -2274,7 +2260,6 @@ function App() {
     slippageBps,
     tier,
     tokenMint,
-    tradeMode,
     userRateLimitUntilMs,
     useBotWalletForTrades,
     useDelegateFastModeBuys,
@@ -2282,37 +2267,65 @@ function App() {
   ])
 
   const sell = useCallback(
-    async (mint: string) => {
-      setError('')
-      setTxSig('')
-
-      if (tradeMode === 'paper') {
-        void paperSellMint(mint, 100)
-        return
-      }
+    async (mint: string, pct: number = 100) => {
+      setSellError('')
+      setSellSig('')
+      setSellMintInFlight(mint)
 
       if (!gates.allowLiveTrading) {
-        setTradeMode('paper')
-        return setError(`Live trading is locked on this plan (current plan: ${tierDisplayName(tier)})`)
+        setSellMintInFlight('')
+        return setSellError(`Live trading is locked on this plan (current plan: ${tierDisplayName(tier)})`)
       }
 
       if (Date.now() < userRateLimitUntilMs) {
-        return setError('Rate limited — backing off briefly')
+        setSellMintInFlight('')
+        return setSellError('Rate limited — backing off briefly')
       }
 
       const walletSigAvailable = Boolean(publicKey && connected && signMessage)
       if (!walletSigAvailable) {
-        return setError('Signature needed in wallet')
+        setSellMintInFlight('')
+        return setSellError('Signature needed in wallet')
       }
 
       const botKp = activeLiveKeypair
       const traderPk = botKp ? botKp.publicKey : publicKey
 
-      if (!traderPk) return setError('Connect wallet (or enable Bot Wallet)')
-      if (!botKp && !signTransaction) return setError('Wallet does not support transaction signing')
+      if (!traderPk) {
+        setSellMintInFlight('')
+        return setSellError('Connect wallet (or enable Bot Wallet)')
+      }
+      if (!botKp && !signTransaction) {
+        setSellMintInFlight('')
+        return setSellError('Wallet does not support transaction signing')
+      }
 
       try {
         const tokenMintPk = new PublicKey(mint)
+
+        const pctClamped = Math.max(1, Math.min(100, Math.floor(Number(pct) || 100)))
+
+        const holdingSnap = holdings.find((h) => h.mint === mint) || null
+        if (holdingSnap && isTokenRugged(holdingSnap)) {
+          setSoldTokens((prev) => [
+            {
+              mint,
+              soldAt: Date.now(),
+              pct: 100,
+              outcome: 'RUGGED',
+              buyMc: holdingSnap.buyMc,
+              sellMc: 0,
+            },
+            ...prev,
+          ])
+          removeHolding(mint)
+          await refreshBalances().catch(() => {})
+          await refreshBotWalletBalance().catch(() => {})
+          setSellStep('idle')
+          setSellMintInFlight('')
+          setSellError('Token marked RUGGED — recorded as complete loss')
+          return
+        }
 
         // Get token balance to sell 100%
         const tokenBalanceInfo = await getTokenBalanceBaseUnits(connection, traderPk, tokenMintPk)
@@ -2320,8 +2333,13 @@ function App() {
           throw new Error('No token balance to sell')
         }
         const tokenBalance = tokenBalanceInfo.amount
+        const amountIn = (tokenBalance * BigInt(pctClamped)) / 100n
+        if (amountIn <= 0n) {
+          throw new Error('Sell amount is too small')
+        }
 
-        setStep('quoting')
+        setSellStep('quoting')
+        pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell: quoting', detail: mint })
         const runWs = async <T,>(fn: (ws: TradingWs) => Promise<T>): Promise<T> => {
           let ws = await ensureWs()
           try {
@@ -2350,7 +2368,7 @@ function App() {
                 userPubkey: traderPk.toBase58(),
                 inputMint: mint,
                 outputMint: SOL_MINT,
-                amountIn: tokenBalance.toString(),
+                amountIn: amountIn.toString(),
                 slippageBps: clamp(slippageBps, 0, 50_000),
               },
             },
@@ -2365,7 +2383,8 @@ function App() {
           throw new Error('Quote missing route.serializedQuote (server must include it for build_swap_tx)')
         }
 
-        setStep('building')
+        setSellStep('building')
+        pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell: building tx', detail: mint })
         const built = await runWs((ws) =>
           ws.request<BuildSwapTxResult>(
             {
@@ -2386,7 +2405,8 @@ function App() {
         const txBase64 = built.data.transactionBase64 || built.data.swapTransaction
         if (!txBase64) throw new Error('build_swap_tx_result missing transactionBase64')
 
-        setStep('signing')
+        setSellStep('signing')
+        pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell: signing', detail: mint })
         const unsignedTx = deserializeTx(txBase64)
 
         let signedTx
@@ -2397,42 +2417,75 @@ function App() {
           signedTx = signed
         }
 
-        setStep('sending')
+        setSellStep('sending')
+        pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell: sending raw tx', detail: mint })
         const sig = await connection.sendRawTransaction(signedTx.serialize(), {
           skipPreflight: false,
-          maxRetries: 0,
+          maxRetries: 3,
         })
-        setTxSig(sig)
+        setSellSig(sig)
         pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell tx sent', detail: sig })
 
-        setStep('confirming')
+        setSellStep('confirming')
         const status = await confirmSignatureWithFallback(connection, sig, {
           commitment: 'confirmed',
-          timeoutMs: 30_000,
+          timeoutMs: 60_000,
           pollIntervalMs: 1000,
         })
 
+        if (status === 'not_found') {
+          setSellStep('idle')
+          setSellMintInFlight('')
+          setSellError('Sell signature not found on chain (dropped?) — try again')
+          pushDebugEvent({ area: 'trade', level: 'warn', message: 'Sell not found on chain', detail: sig })
+          return
+        }
+
         if (status === 'timeout') {
-          setStep('idle')
-          setError('Sell transaction timed out (check signature in explorer)')
+          setSellStep('idle')
+          setSellMintInFlight('')
+          setSellError('Sell transaction timed out (check signature in explorer)')
+          pushDebugEvent({ area: 'trade', level: 'warn', message: 'Sell timed out', detail: sig })
           return
         }
 
         pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell confirmed', detail: sig })
-        removeHolding(mint)
+        setSoldTokens((prev) => [
+          {
+            mint,
+            soldAt: Date.now(),
+            pct: pctClamped,
+            outcome: 'SOLD',
+            signature: sig,
+            buyMc: holdingSnap?.buyMc,
+            sellMc: holdingSnap?.currentMc,
+          },
+          ...prev,
+        ])
+        if (pctClamped >= 100) {
+          removeHolding(mint)
+        }
         await refreshBalances()
         await refreshBotWalletBalance()
-        setStep('idle')
+        setSellStep('idle')
+        setSellMintInFlight('')
       } catch (e) {
         if (isUserRateLimitedError(e)) {
           bumpUserRateLimitBackoff()
-          setStep('idle')
-          setError('Rate limited — retrying soon')
+          setSellStep('idle')
+          setSellMintInFlight('')
+          setSellError('Rate limited — retrying soon')
           return
         }
         recordTradingApiError(e)
-        setStep('idle')
-        setError(e instanceof Error ? e.message : 'Sell failed')
+        setSellStep('idle')
+        setSellMintInFlight('')
+        let msg = e instanceof Error ? e.message : 'Sell failed'
+        if (isJupiterNoRouteErrorMessage(msg)) {
+          msg = 'Token is RUGGED — no route/liquidity to sell'
+        }
+        setSellError(msg)
+        pushDebugEvent({ area: 'trade', level: 'error', message: 'Sell failed', detail: e instanceof Error ? e.message : String(e) })
       }
     },
     [
@@ -2443,17 +2496,18 @@ function App() {
       ensureWs,
       gates.allowLiveTrading,
       isUserRateLimitedError,
-      paperSellMint,
+      holdings,
       publicKey,
+      pushDebugEvent,
       recordTradingApiError,
       refreshBalances,
       refreshBotWalletBalance,
       removeHolding,
+      setSoldTokens,
       signMessage,
       signTransaction,
       slippageBps,
       tier,
-      tradeMode,
       userRateLimitUntilMs,
     ],
   )
@@ -2472,6 +2526,89 @@ function App() {
     if (solanaRpcEndpoint === '—') return '—'
     return solanaRpcEndpoint.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://')
   }, [solanaRpcEndpoint])
+
+  const copyDiagnostics = useCallback(async () => {
+    try {
+      const sig = sellSig || txSig || bgTx?.sig || ''
+      let sigStatus: unknown = null
+      if (sig) {
+        sigStatus = await connection
+          .getSignatureStatuses([sig], { searchTransactionHistory: true })
+          .then((r) => r.value?.[0] ?? null)
+          .catch((e) => ({ error: e instanceof Error ? e.message : String(e) }))
+      }
+
+      const payload = {
+        at: new Date().toISOString(),
+        wallet: {
+          connected,
+          publicKey: publicKey?.toBase58() || null,
+          hasSignMessage: Boolean(signMessage),
+          hasSignTransaction: Boolean(signTransaction),
+        },
+        mode: { tier, gates },
+        sell: {
+          mintInFlight: sellMintInFlight || null,
+          step: sellStep,
+          signature: sellSig || null,
+          error: sellError || null,
+        },
+        solana: { rpcEndpoint: solanaRpcEndpoint, wsEndpoint: solanaWsEndpoint },
+        tradingApi: {
+          wsUrl,
+          wsStatus,
+          wsAuthed,
+          wsDiag,
+          lastWsConnectedAt,
+          lastWsErrorAt,
+          lastTradingApiErrorAt,
+          lastTradingApiErrorCode,
+          lastTradingApiErrorMessage,
+          tradingApiErrorLog,
+        },
+        tx: { txSig, bgTx, sigStatus },
+        ui: { step, error, snipePrompt },
+        timeline: debugTimeline,
+      }
+
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+      pushDebugEvent({ area: 'ui', level: 'info', message: 'Copied diagnostics to clipboard' })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to copy diagnostics'
+      pushDebugEvent({ area: 'ui', level: 'error', message: 'Copy diagnostics failed', detail: msg })
+    }
+  }, [
+    bgTx,
+    connected,
+    connection,
+    debugTimeline,
+    error,
+    gates,
+    lastTradingApiErrorAt,
+    lastTradingApiErrorCode,
+    lastTradingApiErrorMessage,
+    lastWsConnectedAt,
+    lastWsErrorAt,
+    publicKey,
+    pushDebugEvent,
+    sellError,
+    sellMintInFlight,
+    sellSig,
+    sellStep,
+    signMessage,
+    signTransaction,
+    snipePrompt,
+    solanaRpcEndpoint,
+    solanaWsEndpoint,
+    step,
+    tier,
+    tradingApiErrorLog,
+    txSig,
+    wsAuthed,
+    wsDiag,
+    wsStatus,
+    wsUrl,
+  ])
 
   const runSolProbe = useCallback(async () => {
     const started = performance.now()
@@ -2894,6 +3031,27 @@ function App() {
           <div className="brandSub">{dashboardSubtitle}</div>
         </div>
         <div className="actions">
+          <div className="walletBlock">
+            <div className={connected ? 'walletGlow walletGlowOk' : 'walletGlow walletGlowBad'}>
+              <BaseWalletMultiButton
+                className="walletBtn"
+                labels={{
+                  'change-wallet': 'Change wallet',
+                  connecting: 'Connecting ...',
+                  'copy-address': 'Copy address',
+                  copied: 'Copied',
+                  disconnect: 'Disconnect',
+                  'has-wallet': 'Connect Wallet',
+                  'no-wallet': 'Connect Wallet',
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div className="tabs">
+        <div className="tabsLeft">
           <div className="engineBlock">
             <RadarPulse isNewTokenFound={isNewTokenFound} isCriticalSignal={hasCriticalSignal} />
             <div className="engineStatus">
@@ -2926,84 +3084,42 @@ function App() {
                 </option>
               ))}
             </select>
-            <div className="seg">
-              <button
-                className={tradeMode === 'paper' ? 'segBtn segBtnActive' : 'segBtn'}
-                aria-pressed={tradeMode === 'paper'}
-                onClick={() => setTradeMode('paper')}
-              >
-                Paper
-              </button>
-              <button
-                className={tradeMode === 'live' ? 'segBtn segBtnActive' : 'segBtn'}
-                aria-pressed={tradeMode === 'live'}
-                onClick={() => {
-                  if (!gates.allowLiveTrading) {
-                    setError('Live trading is locked on Paper tier')
-                    setTradeMode('paper')
-                    return
-                  }
-                  setTradeMode('live')
-                }}
-              >
-                Live
-              </button>
-            </div>
-          </div>
-          <div className="walletBlock">
-            <div className={connected ? 'walletGlow walletGlowOk' : 'walletGlow walletGlowBad'}>
-              <BaseWalletMultiButton
-                className="walletBtn"
-                labels={{
-                  'change-wallet': 'Change wallet',
-                  connecting: 'Connecting ...',
-                  'copy-address': 'Copy address',
-                  copied: 'Copied',
-                  disconnect: 'Disconnect',
-                  'has-wallet': 'Connect Wallet',
-                  'no-wallet': 'Connect Wallet',
-                }}
-              />
-            </div>
-            <div
-              className="walletAuthPills"
-              title={apiKey.trim() || authToken.trim() ? 'Legacy auth' : connected && publicKey ? 'Wallet auth' : 'No auth'}
-            >
-              <span
-                className={`healthPill ${(connected && publicKey) || apiKey.trim() || authToken.trim() ? 'ok' : 'warn'}`}
-              >
-                {authLabel}
-              </span>
-              {connected && publicKey && signMessage && !wsAuthed ? (
-                <button
-                  type="button"
-                  className="healthPill warn"
-                  onClick={retryWalletAuth}
-                  disabled={walletActionHint === 'signature'}
-                  title="If you dismissed Phantom's signature prompt, click to try again"
-                >
-                  Retry wallet auth
-                </button>
-              ) : null}
-              {Date.now() < userRateLimitUntilMs ? <span className="healthPill warn">Backoff</span> : null}
-              {subscriptionStatus?.active && subscriptionStatus?.overdue ? (
-                <span className="healthPill warn" title="Subscription payment is overdue">
-                  Renew overdue
-                </span>
-              ) : null}
-              {subscriptionStatus?.active && !subscriptionStatus?.overdue && subscriptionStatus?.needsRenewalSoon ? (
-                <span className="healthPill warn" title="Subscription renewal coming up soon">
-                  Renew soon
-                </span>
-              ) : null}
-            </div>
           </div>
         </div>
-      </header>
-
-      <div className="tabs">
-        <div className="tabsLeft" />
-        <div className="tabsRight" />
+        <div className="tabsRight">
+          <div
+            className="walletAuthPills"
+            title={apiKey.trim() || authToken.trim() ? 'Legacy auth' : connected && publicKey ? 'Wallet auth' : 'No auth'}
+          >
+            <span
+              className={`healthPill ${(connected && publicKey) || apiKey.trim() || authToken.trim() ? 'ok' : 'warn'}`}
+            >
+              {authLabel}
+            </span>
+            {connected && publicKey && signMessage && !wsAuthed ? (
+              <button
+                type="button"
+                className="healthPill warn"
+                onClick={retryWalletAuth}
+                disabled={walletActionHint === 'signature'}
+                title="If you dismissed Phantom's signature prompt, click to try again"
+              >
+                Retry wallet auth
+              </button>
+            ) : null}
+            {Date.now() < userRateLimitUntilMs ? <span className="healthPill warn">Backoff</span> : null}
+            {subscriptionStatus?.active && subscriptionStatus?.overdue ? (
+              <span className="healthPill warn" title="Subscription payment is overdue">
+                Renew overdue
+              </span>
+            ) : null}
+            {subscriptionStatus?.active && !subscriptionStatus?.overdue && subscriptionStatus?.needsRenewalSoon ? (
+              <span className="healthPill warn" title="Subscription renewal coming up soon">
+                Renew soon
+              </span>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       <main id="minimalist-view" style={{ display: 'flex', gap: '16px', marginTop: '16px', alignItems: 'start' }}>
@@ -3031,12 +3147,30 @@ function App() {
                   </div>
                   <div className="panelChevron">{holdingsOpen ? '▾' : '▸'}</div>
                 </div>
-                <div className="panelHint">Tracked buys + PnL% (paper + live)</div>
+                <div className="panelHint">Tracked buys + PnL%</div>
               </div>
 
               {holdingsOpen ? (
                 <>
                   <div style={{ paddingRight: '4px' }}>
+                    {sellError ? (
+                      <div className="error" style={{ marginBottom: '10px' }}>
+                        Sell: {sellError}
+                      </div>
+                    ) : null}
+                    {sellSig ? (
+                      <div className="note" style={{ marginBottom: '10px' }}>
+                        <a
+                          href={`https://solscan.io/tx/${sellSig}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >
+                          View sell on Solscan
+                        </a>
+                      </div>
+                    ) : null}
+
                     <div className="watchHeaderRow watchHeaderRowHoldings">
                       <div className="watchHeaderCell watchHeaderCellLeft">Token</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Buy Age</div>
@@ -3051,15 +3185,54 @@ function App() {
                         const pnl = computeGrowthPct(h.buyMc, h.currentMc)
                         const isHot = typeof pnl === 'number' && Number.isFinite(pnl) && pnl >= growthTriggerPct
                         const buyAgeMs = Date.now() - (typeof h.boughtAt === 'number' ? h.boughtAt : Date.now())
+                        const sellingThis = sellMintInFlight === h.mint && sellStep !== 'idle'
+                        const tokenLabel = (h.symbol || h.name || '').trim() || shortPk(h.mint)
+                        const rugged = isTokenRugged(h)
                         return (
                           <div key={h.mint} className={isHot ? 'watchRow watchRowHoldings watchRowHot' : 'watchRow watchRowHoldings'}>
                             <div className="watchRowHeat" />
                             <div className="watchCell watchCellLeft" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                              <span className="mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {shortPk(h.mint)}
+                              <span
+                                className="watchTokenFlip"
+                                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, cursor: 'pointer' }}
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(h.mint)
+                                    setCopiedMint(h.mint)
+                                    setTimeout(() => setCopiedMint(''), 2000)
+                                  } catch {
+                                    // ignore
+                                  }
+                                }}
+                                title={`${h.mint} (click to copy)`}
+                              >
+                                <span className="watchTokenSymbol">{tokenLabel}</span>
+                                <span className="watchTokenAddr mono">{shortPk(h.mint)}</span>
                               </span>
-                              <span className={isHot ? 'tokenRowBadge tokenRowBadgeHot' : 'tokenRowBadge tokenRowBadgeTrack'}>
-                                {isHot ? 'HOT' : 'HOLD'}
+                              {copiedMint === h.mint ? (
+                                <span
+                                  className="tokenRowBadge"
+                                  style={{
+                                    background: 'rgba(0, 255, 163, 0.15)',
+                                    borderColor: 'rgba(0, 255, 163, 0.35)',
+                                    color: 'var(--neon-green)',
+                                    fontSize: '10px',
+                                    padding: '2px 6px',
+                                  }}
+                                >
+                                  Copied
+                                </span>
+                              ) : null}
+                              <span
+                                className={
+                                  rugged
+                                    ? 'tokenRowBadge tokenRowBadgeRugged'
+                                    : isHot
+                                      ? 'tokenRowBadge tokenRowBadgeHot'
+                                      : 'tokenRowBadge tokenRowBadgeTrack'
+                                }
+                              >
+                                {rugged ? 'RUGGED' : isHot ? 'HOT' : 'HOLD'}
                               </span>
                             </div>
                             <div className="watchCell watchCellCenter mono" title={formatTs(h.boughtAt)}>
@@ -3081,10 +3254,37 @@ function App() {
                             <div className="watchActions">
                               <button
                                 className="ghost"
-                                onClick={() => void sell(h.mint)}
-                                disabled={step !== 'idle'}
+                                onClick={async () => {
+                                  if (rugged) {
+                                    setSoldTokens((prev) => [
+                                      {
+                                        mint: h.mint,
+                                        soldAt: Date.now(),
+                                        pct: 100,
+                                        outcome: 'RUGGED',
+                                        buyMc: h.buyMc,
+                                        sellMc: 0,
+                                      },
+                                      ...prev,
+                                    ])
+                                    removeHolding(h.mint)
+                                    await refreshBalances().catch(() => {})
+                                    await refreshBotWalletBalance().catch(() => {})
+                                    setSellError('Token marked RUGGED — recorded as complete loss')
+                                    setSnipeCardSide('sell')
+                                    return
+                                  }
+
+                                  setSnipeCardSide('sell')
+                                  setSellMintInput(h.mint)
+                                  setSellPct(100)
+                                  const panel = document.getElementById('snipe-panel')
+                                  panel?.classList.add('animate-glitch-pulse')
+                                  setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
+                                }}
+                                disabled={step !== 'idle' || sellStep !== 'idle'}
                               >
-                                Sell
+                                {sellingThis ? `${sellStep}…` : 'Sell'}
                               </button>
                               <button className="ghost" onClick={() => removeHolding(h.mint)}>
                                 Remove
@@ -3181,7 +3381,7 @@ function App() {
                         const mcGrowth = computeGrowthPct(t.entryMc, t.currentMc)
                         const growth = typeof mcGrowth === 'number' ? mcGrowth : typeof t.growthPct === 'number' ? t.growthPct : 0
                         const isHot = Number.isFinite(growth) && growth >= growthTriggerPct
-                        const ruggedLabel = t.error && isJupiterNoRouteErrorMessage(t.error) ? 'RUGGED' : ''
+                        const ruggedLabel = isTokenRugged({ error: t.error ?? null, isRugged: (t as any).isRugged ?? null, liquidityStatus: (t as any).liquidityStatus ?? null }) ? 'RUGGED' : ''
                         const ageMs = Date.now() - (typeof t.addedAt === 'number' ? t.addedAt : Date.now())
                         const tokenLabel = (t.symbol || t.name || '').trim() || shortPk(t.mint)
                         return (
@@ -3190,13 +3390,37 @@ function App() {
                             <div className="watchCell watchCellLeft" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
                               <span
                                 className="watchTokenFlip"
-                                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}
+                                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, cursor: 'pointer' }}
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(t.mint)
+                                    setCopiedMint(t.mint)
+                                    setTimeout(() => setCopiedMint(''), 2000)
+                                  } catch {
+                                    // Fallback: ignore if clipboard API fails
+                                  }
+                                }}
+                                title={`${t.mint} (click to copy)`}
                               >
-                                <span className="watchTokenSymbol" title={t.mint}>
+                                <span className="watchTokenSymbol">
                                   {tokenLabel}
                                 </span>
                                 <span className="watchTokenAddr mono">{shortPk(t.mint)}</span>
                               </span>
+                              {copiedMint === t.mint ? (
+                                <span
+                                  className="tokenRowBadge"
+                                  style={{
+                                    background: 'rgba(0, 255, 163, 0.15)',
+                                    borderColor: 'rgba(0, 255, 163, 0.35)',
+                                    color: 'var(--neon-green)',
+                                    fontSize: '10px',
+                                    padding: '2px 6px',
+                                  }}
+                                >
+                                  Copied!
+                                </span>
+                              ) : null}
                               <span className={isHot ? 'tokenRowBadge tokenRowBadgeHot' : 'tokenRowBadge tokenRowBadgeTrack'}>
                                 {isHot ? 'HOT' : 'TRACK'}
                               </span>
@@ -3231,6 +3455,12 @@ function App() {
                               <button
                                 className="ghost"
                                 onClick={() => {
+                                  if (ruggedLabel) {
+                                    const confirmed = window.confirm(
+                                      `This token appears to be rugged (no liquidity route found).\n\nAre you sure you want to continue?\n\nMint: ${t.mint}`
+                                    )
+                                    if (!confirmed) return
+                                  }
                                   setTokenMint(t.mint)
                                   const panel = document.getElementById('snipe-panel')
                                   panel?.classList.add('animate-glitch-pulse')
@@ -3274,7 +3504,21 @@ function App() {
                 }}
               >
                 <div className="panelHeadTop">
-                  <div className="panelTitle">Live Feed</div>
+                  <div className="panelTitle" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    Live Feed
+                    <span
+                      aria-label={feedError ? 'Feed error' : 'Feed healthy'}
+                      title={feedError ? 'Feed error' : 'Feed healthy'}
+                      style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '999px',
+                        background: feedError ? 'rgba(248,81,73,0.95)' : 'rgba(46,208,110,0.95)',
+                        boxShadow: feedError ? '0 0 10px rgba(248,81,73,0.35)' : '0 0 10px rgba(46,208,110,0.25)',
+                        flex: '0 0 auto',
+                      }}
+                    />
+                  </div>
                   <div className="panelChevron">{liveFeedOpen ? '▾' : '▸'}</div>
                 </div>
                 <div className="panelHint">Auto-refreshing kinetic stream from dequanW</div>
@@ -3287,8 +3531,6 @@ function App() {
 
               {liveFeedOpen ? (
                 <>
-                  {feedError ? <div className="error" style={{ marginBottom: '12px' }}>Feed: {feedError}</div> : null}
-
                   {/* THE STREAM CONTAINER */}
                   <div style={{ paddingRight: '4px', position: 'relative' }}>
                     <div className="scanning-line" />
@@ -3358,179 +3600,341 @@ function App() {
           <aside style={{ flex: '0 0 35%', position: 'sticky', top: '100px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
             {/* SNIPE PANEL */}
             <section id="snipe-panel" className="panel">
-              <div className="panelHead">
-                <div className="panelTitle">
-                  Snipe
-                  <HelpDot href={helpUrl('submitted-vs-confirmed')} title="Submitted vs confirmed" />
-                  <HelpDot href={helpUrl('real-solana-ws-confirm')} title="Real Solana WS confirmations" />
-                </div>
-                <div className="panelHint">Quick execution</div>
-              </div>
+              <div className={`flipCard ${snipeCardSide === 'sell' ? 'isFlipped' : ''}`}>
+                <div className="flipCardInner">
+                  <div className="flipCardFace flipCardFront">
+                    <div className="panelHead">
+                      <div className="panelTitle">
+                        <button
+                          type="button"
+                          className="panelTitleButton panelHeadClickable"
+                          onClick={() => setSnipeCardSide('sell')}
+                          title="Flip to Sell"
+                          aria-label="Flip to Sell"
+                        >
+                          Snipe
+                        </button>
+                        <HelpDot href={helpUrl('submitted-vs-confirmed')} title="Submitted vs confirmed" />
+                        <HelpDot href={helpUrl('real-solana-ws-confirm')} title="Real Solana WS confirmations" />
+                      </div>
+                      <div className="panelHint">Quick execution</div>
+                    </div>
 
-              <div className="row">
-                <label>Token Mint</label>
-                <input
-                  value={tokenMint}
-                  onChange={(e) => setTokenMint(e.target.value)}
-                  placeholder="Token mint address…"
-                  spellCheck={false}
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                />
-              </div>
+                    <div className="row">
+                      <label>Token Mint</label>
+                      <input
+                        value={tokenMint}
+                        onChange={(e) => setTokenMint(e.target.value)}
+                        placeholder="Token mint address…"
+                        spellCheck={false}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                      />
+                    </div>
 
-              <div className="row">
-                <label>Amount (SOL)</label>
-                <div className="inline">
-                  <input
-                    value={amountSol}
-                    onChange={(e) => setAmountSol(e.target.value)}
-                    inputMode="decimal"
-                    placeholder="0.01"
-                  />
-                  <div className="quick">
-                    <button className={amountSol === '0.01' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.01')}>
-                      0.01
-                    </button>
-                    <button className={amountSol === '0.05' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.05')}>
-                      0.05
-                    </button>
-                    <button className={amountSol === '0.1' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.1')}>
-                      0.1
-                    </button>
+                    <div className="row">
+                      <label>Amount (SOL)</label>
+                      <div className="inline">
+                        <input
+                          value={amountSol}
+                          onChange={(e) => setAmountSol(e.target.value)}
+                          inputMode="decimal"
+                          placeholder="0.01"
+                        />
+                        <div className="quick">
+                          <button className={amountSol === '0.01' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.01')}>
+                            0.01
+                          </button>
+                          <button className={amountSol === '0.05' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.05')}>
+                            0.05
+                          </button>
+                          <button className={amountSol === '0.1' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.1')}>
+                            0.1
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="row">
+                      <label>Slippage (bps)</label>
+                      <div className="inline">
+                        <input
+                          value={String(slippageBps)}
+                          onChange={(e) => setSlippageBps(Number(e.target.value))}
+                          inputMode="numeric"
+                          placeholder="4000"
+                        />
+                      </div>
+                    </div>
+
+                    {gates.allowLiveTrading ? (
+                      <div className="row" style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+                        <div className="note" style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                          Fee breakdown ({(() => {
+                            const bps = gates.tradeFeeBps ?? 100
+                            return `${(bps / 100).toFixed(2)}% protocol fee`
+                          })()})
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
+                          <span className="muted">Trade amount</span>
+                          <span className="mono">{amountSol} SOL</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
+                          <span className="muted">Fee ({(() => {
+                            const bps = gates.tradeFeeBps ?? 100
+                            return `${(bps / 100).toFixed(2)}%`
+                          })()})</span>
+                          <span className="mono">{(() => {
+                            const amt = Number(amountSol || 0)
+                            const bps = gates.tradeFeeBps ?? 100
+                            const feeRate = bps / 10000
+                            return Number.isFinite(amt) && amt > 0 ? (amt * feeRate).toFixed(6) : '0.000000'
+                          })()} SOL</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                          <span>Total required</span>
+                          <span className="mono">{(() => {
+                            const amt = Number(amountSol || 0)
+                            const bps = gates.tradeFeeBps ?? 100
+                            const feeRate = bps / 10000
+                            return Number.isFinite(amt) && amt > 0 ? (amt * (1 + feeRate)).toFixed(6) : '0.000000'
+                          })()} SOL</span>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="ctaRow">
+                      <button className="primary" onClick={buy} disabled={step !== 'idle'} style={{ flex: 1 }}>
+                        {step === 'idle' ? 'Snipe' : step === 'done' ? 'Done' : `${step}…`}
+                      </button>
+                    </div>
+
+                    {snipePrompt && step === 'connecting' ? (
+                      <div className="note" style={{ marginTop: '10px', color: 'var(--muted)' }}>
+                        {snipePrompt}
+                      </div>
+                    ) : null}
+
+                    {uiError ? (
+                      <div className="error" title={uiErrorTitle || undefined}>
+                        {uiError}
+                      </div>
+                    ) : null}
+                    {txSig ? (
+                      <div className="note">
+                        <a
+                          href={`https://solscan.io/tx/${txSig}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >
+                          View on Solscan
+                        </a>
+                      </div>
+                    ) : null}
+
+                    {bgTx && bgTx.sig === txSig ? (
+                      <div className="note" style={{ color: 'var(--muted)' }}>
+                        {bgTx.status === 'confirming'
+                          ? `Submitted (sig received) — confirming in background…`
+                          : bgTx.status === 'confirmed'
+                            ? 'Confirmed'
+                            : bgTx.status === 'not_found'
+                              ? 'Signature not found on chain — likely dropped (retry)'
+                              : bgTx.status === 'timeout'
+                                ? 'Still confirming — check Solscan'
+                                : bgTx.error
+                                  ? `Confirmation failed: ${bgTx.error}`
+                                  : 'Confirmation failed'}
+                      </div>
+                    ) : null}
+
+                    <div className="statusCompact">
+                      <div className="statusLine">
+                        <span className="muted">SOL Balance</span>
+                        <span className="mono">
+                          {!connected
+                            ? 'Connect wallet'
+                            : balanceLoading
+                              ? '…'
+                              : solBalanceLamports !== null
+                                ? (Number(solBalanceLamports) / 1e9).toFixed(4)
+                                : balanceError
+                                  ? 'RPC error'
+                                  : '—'}
+                        </span>
+                      </div>
+                      <div className="statusLine">
+                        <span className="muted">Token Balance</span>
+                        <span className="mono">
+                          {!connected
+                            ? '—'
+                            : balanceLoading
+                              ? '…'
+                              : tokenBalance !== null
+                                ? (Number(tokenBalance.amount) / Math.pow(10, tokenBalance.decimals)).toFixed(4)
+                                : balanceError
+                                  ? 'RPC error'
+                                  : '—'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {connected && balanceError ? (
+                      <div className="note" style={{ color: 'var(--muted)' }}>
+                        Balance fetch issue: {balanceError}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="flipCardFace flipCardBack">
+                    <div className="panelHead">
+                      <div className="panelTitle">Sell</div>
+                      <div className="panelHint">
+                        <button
+                          className="pillBtn"
+                          onClick={() => {
+                            setSnipeCardSide('snipe')
+                          }}
+                          type="button"
+                        >
+                          Return to Snipe
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="row">
+                      <label>Token Mint</label>
+                      <input
+                        value={sellMintInput}
+                        onChange={(e) => setSellMintInput(e.target.value.trim())}
+                        placeholder="Token mint address…"
+                        spellCheck={false}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                      />
+                    </div>
+
+                    <div className="row">
+                      <label>Sell %</label>
+                      <div className="inline">
+                        <div className="quick">
+                          <button className={sellPct === 25 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(25)} type="button">
+                            25%
+                          </button>
+                          <button className={sellPct === 50 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(50)} type="button">
+                            50%
+                          </button>
+                          <button className={sellPct === 100 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(100)} type="button">
+                            100%
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="ctaRow">
+                      <button
+                        className="primary danger"
+                        onClick={() => sell(sellMintInput, sellPct)}
+                        disabled={!sellMintInput || sellStep !== 'idle'}
+                        style={{ flex: 1 }}
+                      >
+                        {sellStep === 'idle' ? 'Sell' : `Selling… (${sellStep})`}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSellMintInput('')
+                          setSellPct(100)
+                        }}
+                        disabled={sellStep !== 'idle'}
+                        type="button"
+                      >
+                        Clear
+                      </button>
+                    </div>
+
+                    {sellError ? (
+                      <div className="error">
+                        {sellError}
+                      </div>
+                    ) : null}
+
+                    {sellSig ? (
+                      <div className="note">
+                        <a
+                          href={`https://solscan.io/tx/${sellSig}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >
+                          View sell on Solscan
+                        </a>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
-
-              <div className="row">
-                <label>Slippage (bps)</label>
-                <div className="inline">
-                  <input
-                    value={String(slippageBps)}
-                    onChange={(e) => setSlippageBps(Number(e.target.value))}
-                    inputMode="numeric"
-                    placeholder="4000"
-                  />
-                </div>
-              </div>
-
-              {tradeMode === 'live' ? (
-                <div className="row" style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-                  <div className="note" style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                    Fee breakdown ({(() => {
-                      const bps = gates.tradeFeeBps ?? 100
-                      return `${(bps / 100).toFixed(2)}% protocol fee`
-                    })()})
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
-                    <span className="muted">Trade amount</span>
-                    <span className="mono">{amountSol} SOL</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
-                    <span className="muted">Fee ({(() => {
-                      const bps = gates.tradeFeeBps ?? 100
-                      return `${(bps / 100).toFixed(2)}%`
-                    })()})</span>
-                    <span className="mono">{(() => {
-                      const amt = Number(amountSol || 0)
-                      const bps = gates.tradeFeeBps ?? 100
-                      const feeRate = bps / 10000
-                      return Number.isFinite(amt) && amt > 0 ? (amt * feeRate).toFixed(6) : '0.000000'
-                    })()} SOL</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                    <span>Total required</span>
-                    <span className="mono">{(() => {
-                      const amt = Number(amountSol || 0)
-                      const bps = gates.tradeFeeBps ?? 100
-                      const feeRate = bps / 10000
-                      return Number.isFinite(amt) && amt > 0 ? (amt * (1 + feeRate)).toFixed(6) : '0.000000'
-                    })()} SOL</span>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="ctaRow">
-                <button className="primary" onClick={buy} disabled={step !== 'idle'} style={{ flex: 1 }}>
-                  {step === 'idle' ? 'Snipe' : step === 'done' ? 'Done' : `${step}…`}
-                </button>
-              </div>
-
-              {snipePrompt && step === 'connecting' ? (
-                <div className="note" style={{ marginTop: '10px', color: 'var(--muted)' }}>
-                  {snipePrompt}
-                </div>
-              ) : null}
-
-              {uiError ? (
-                <div className="error" title={uiErrorTitle || undefined}>
-                  {uiError}
-                </div>
-              ) : null}
-              {txSig ? (
-                <div className="note">
-                  <a
-                    href={`https://solscan.io/tx/${txSig}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-                  >
-                    View on Solscan
-                  </a>
-                </div>
-              ) : null}
-
-              {bgTx && bgTx.sig === txSig ? (
-                <div className="note" style={{ color: 'var(--muted)' }}>
-                  {bgTx.status === 'confirming'
-                    ? `Submitted (sig received) — confirming in background…`
-                    : bgTx.status === 'confirmed'
-                      ? 'Confirmed'
-                      : bgTx.status === 'timeout'
-                        ? 'Still confirming — check Solscan'
-                        : bgTx.error
-                          ? `Confirmation failed: ${bgTx.error}`
-                          : 'Confirmation failed'}
-                </div>
-              ) : null}
-
-              <div className="statusCompact">
-                <div className="statusLine">
-                  <span className="muted">SOL Balance</span>
-                  <span className="mono">
-                    {!connected
-                      ? 'Connect wallet'
-                      : balanceLoading
-                        ? '…'
-                        : solBalanceLamports !== null
-                          ? (Number(solBalanceLamports) / 1e9).toFixed(4)
-                          : balanceError
-                            ? 'RPC error'
-                            : '—'}
-                  </span>
-                </div>
-                <div className="statusLine">
-                  <span className="muted">Token Balance</span>
-                  <span className="mono">
-                    {!connected
-                      ? '—'
-                      : balanceLoading
-                        ? '…'
-                        : tokenBalance !== null
-                          ? (Number(tokenBalance.amount) / Math.pow(10, tokenBalance.decimals)).toFixed(4)
-                          : balanceError
-                            ? 'RPC error'
-                            : '—'}
-                  </span>
-                </div>
-              </div>
-
-              {connected && balanceError ? (
-                <div className="note" style={{ color: 'var(--muted)' }}>
-                  Balance fetch issue: {balanceError}
-                </div>
-              ) : null}
             </section>
+
+            {snipeCardSide === 'sell' ? (
+              <section className="panel">
+                <div className="panelHead">
+                  <div className="panelTitle">Sold Tokens</div>
+                  <div className="panelHint">
+                    <button className="pillBtn" disabled={soldTokens.length === 0} onClick={() => setSoldTokens([])} type="button">
+                      Clear all
+                    </button>
+                  </div>
+                </div>
+                <div className="panelBody" style={{ paddingTop: 0 }}>
+                  {soldTokens.length === 0 ? (
+                    <div className="note" style={{ color: 'var(--text-muted)' }}>
+                      No sold tokens yet.
+                    </div>
+                  ) : (
+                    <div className="tableWrap" style={{ marginTop: 10 }}>
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Mint</th>
+                                <th>%</th>
+                            <th>When</th>
+                            <th>Sig</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {soldTokens.map((t) => (
+                            <tr key={`${t.mint}-${t.soldAt}`}>
+                              <td className="mono" style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {t.mint}
+                              </td>
+                                  <td className="mono">{typeof t.pct === 'number' ? `${Math.max(1, Math.min(100, Math.floor(t.pct)))}%` : '—'}</td>
+                              <td className="mono">{new Date(t.soldAt).toLocaleString()}</td>
+                              <td className="mono" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {t.signature ? (
+                                  <a
+                                    href={`https://solscan.io/tx/${t.signature}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                                  >
+                                    {t.signature}
+                                  </a>
+                                ) : t.outcome === 'RUGGED' ? (
+                                  <span className="tokenRowBadge tokenRowBadgeRugged">RUGGED</span>
+                                ) : (
+                                  ''
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </section>
+            ) : null}
 
             {gates.allowFastMode ? (
               <section className="panel">
@@ -3587,7 +3991,7 @@ function App() {
                     <button
                       className="primary"
                       onClick={enableFastMode}
-                      disabled={!connected || tradeMode !== 'live'}
+                      disabled={!connected || !gates.allowLiveTrading}
                       style={{ flex: 1 }}
                     >
                       Enable Fast Mode
@@ -3634,7 +4038,7 @@ function App() {
                           setBotWalletError(e instanceof Error ? e.message : 'Failed to create bot wallet')
                         }
                       }}
-                      disabled={tradeMode !== 'live'}
+                      disabled={!gates.allowLiveTrading}
                     >
                       Create Bot Wallet
                     </button>
@@ -3658,7 +4062,7 @@ function App() {
                         <button
                           className={useBotWalletForTrades ? 'pillBtn pillBtnActive' : 'pillBtn'}
                           onClick={() => setUseBotWalletForTrades(true)}
-                          disabled={tradeMode !== 'live'}
+                          disabled={!gates.allowLiveTrading}
                         >
                           ON
                         </button>
@@ -3699,66 +4103,6 @@ function App() {
                 )}
 
                 {botWalletError ? <div className="error">{botWalletError}</div> : null}
-              </section>
-            ) : null}
-
-            {/* PAPER POSITIONS (if in paper mode) */}
-            {tradeMode === 'paper' ? (
-              <section className="panel">
-                <div className="panelHead">
-                  <div className="panelTitle">
-                    Paper Positions
-                    <HelpDot href={helpUrl('submitted-vs-confirmed')} title="Submitted vs confirmed" />
-                  </div>
-                  <div className="panelHint">Simulated holdings</div>
-                </div>
-
-                <div className="statusGrid">
-                  <div className="kpi">
-                    <div className="kpiLabel">Paper SOL</div>
-                    <div className="kpiValue">{(Number(paper.solLamports) / 1e9).toFixed(4)}</div>
-                  </div>
-                  <div className="kpi">
-                    <div className="kpiLabel">Positions</div>
-                    <div className="kpiValue">{paper.positions.length}</div>
-                  </div>
-                </div>
-
-                <div className="tableWrap">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>Token</th>
-                        <th>PnL</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {paper.positions.map((pos) => {
-                        const pnl =
-                          ((Number(bigintFromString(pos.lastPriceProxyScaled || '0')) / Number(PRICE_PROXY_SCALE)) /
-                            (Number(bigintFromString(pos.entryPriceProxyScaled)) / Number(PRICE_PROXY_SCALE)) -
-                            1) *
-                          100
-                        return (
-                          <tr key={pos.mint}>
-                            <td className="mono">{shortPk(pos.mint)}</td>
-                            <td className={pnl >= 0 ? 'pos' : 'neg'}>{pnl.toFixed(2)}%</td>
-                            <td>
-                              <div className="tableBtns">
-                                {([25, 50, 100] as const).map((pct) => (
-                                  <button key={pct} className="ghost" onClick={() => void paperSellMint(pos.mint, pct)}>
-                                    {pct}%
-                                  </button>
-                                ))}
-                              </div>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
               </section>
             ) : null}
           </aside>
@@ -3949,7 +4293,6 @@ function App() {
 
                     <div className="debugKv"><span>Auth label</span><span className="mono">{authLabel}</span></div>
                     <div className="debugKv"><span>Tier (client)</span><span className="mono">{tier}</span></div>
-                    <div className="debugKv"><span>Mode</span><span className="mono">{tradeMode}</span></div>
                     <div className="debugKv"><span>Gates</span><span className="mono">{JSON.stringify(gates)}</span></div>
                   </div>
 
@@ -4045,6 +4388,11 @@ function App() {
                     <div className="debugKv"><span>BG tx finished</span><span className="mono">{bgTx?.finishedAt ? formatTs(bgTx.finishedAt) : '—'}</span></div>
                     <div className="debugKv"><span>BG tx latency</span><span className="mono">{bgTx?.finishedAt ? `${Math.max(0, Math.round((bgTx.finishedAt - bgTx.startedAt) / 1000))}s` : '—'}</span></div>
                     <div className="debugKv"><span>BG tx error</span><span className="mono">{bgTx?.error || '—'}</span></div>
+                    <div className="ctaRow" style={{ marginTop: '10px' }}>
+                      <button className="secondary" onClick={() => void copyDiagnostics()}>
+                        Copy diagnostics
+                      </button>
+                    </div>
                   </div>
 
                   <div className="debugCard">

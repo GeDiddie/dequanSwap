@@ -91,6 +91,13 @@ All messages are JSON. Every request includes `requestId`.
 - `hello_ok` (server → client): includes `tierInfo` and limits
 
 ### 3.2 Orders (SSOT for trade lifecycle)
+- **Target (dequanW parity):** backend is the source-of-truth for order state and confirmation, and emits `order_update` events.
+- **Current public dequanSwap:** backend returns an unsigned tx, but the **browser submits + confirms** via Solana RPC.
+  - This is simpler to ship, but requires strong client-side handling for:
+    - bounded confirmation (no “confirm forever”)
+    - distinguishing **not_found (dropped)** vs **timeout (unknown)**
+    - clear UX around safe retries
+
 - `create_order` (buy/sell intent)
   - request: `{ side, mint, amountSpec, slippageBps, priorityFeeSpec, mode }`
   - response: `{ orderId }`
@@ -161,3 +168,7 @@ Required:
 - `/health` endpoints for Control Plane and Trading WS
 - Bounded logs
 - Connection metrics: WS disconnect rate, order failure codes, confirmation latency
+
+Recommended (to reduce production debugging time):
+- Client “copy diagnostics” export (last tx sig + signature status + endpoints + recent WS/auth events)
+- Backend order audit trail keyed by `orderId` and `signature` (submit result + confirmation result)

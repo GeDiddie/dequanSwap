@@ -10,7 +10,7 @@ Live at: [snipe.dequan.xyz](https://snipe.dequan.xyz)
 
 A tiered, non-custodial swap/snipe interface with:
 - **Real-time feed**: Kinetic vertical stream of new tokens from dequanW's 1-minute strategy
-- **Multiple trade modes**: Paper trading (simulation) and Live trading (Phantom signature)
+- **Live trading**: Phantom signature per trade
 - **Fast Mode** (Sniper/Apex): Experimental no-popup execution via WSOL delegation + session key
 - **Tier gating**: Scout/Sniper/Apex product tiers with progressive feature unlocks
 
@@ -240,7 +240,8 @@ In your personal dequanW bot, a successful buy typically **moves** a token from 
 dequanSwap mirrors that UX, but it’s frontend-native:
 
 - **Watchlist (“Watching” panel)** is stored in the browser (`localStorage` key: `dequanswap.watchedTokens`).
-- **Holdings (“Holdings” panel)** is also stored in the browser (`localStorage` key: `dequanswap.holdings`).
+- **Holdings (“Holdings” panel)** is stored per wallet (`localStorage` key: `dequanswap.holdings.{walletAddress}`).
+- **Sold Tokens (“Sold Tokens” panel)** is stored per wallet (`localStorage` key: `dequanswap.soldTokens.{walletAddress}`).
 
 When you press **Snipe** and the transaction is confirmed, the UI calls `addHolding(mint)` in [src/App.tsx](src/App.tsx):
 
@@ -251,6 +252,16 @@ Notes:
 
 - This does **not** write to any database. It’s per-browser/per-device state.
 - Holdings “current MC” gets refreshed from the live feed over time, so PnL% updates as the feed updates.
+
+### Holdings → Sell → Sold Tokens
+
+Selling is treated as a first-class workflow:
+
+- Clicking **Sell** in the **Holdings** panel flips the right-hand **Snipe** card to a **Sell** back-side.
+- The Sell view is pre-filled with the holding’s mint, supports quick percent buttons (25/50/100), and shows the sell signature/error.
+- On confirmed sell, the UI appends a Sold Tokens history entry and updates Holdings.
+
+Implementation details: [docs/product/TRADE_LIFECYCLE.md](docs/product/TRADE_LIFECYCLE.md)
 
 **Implementation**: [docs/product/FAST_MODE.md](docs/product/FAST_MODE.md)
 
@@ -321,5 +332,5 @@ Proprietary - Internal use only
 
 **Maintainer**: g1@G1  
 **Created**: December 2025  
-**Last Updated**: January 3, 2026
+**Last Updated**: January 5, 2026
 

@@ -11,7 +11,6 @@ This document defines what is **enabled**, **disabled**, or **limited** by tier.
 
 | Capability | Scout | Sniper | Apex |
 |---|---:|---:|---:|
-| Paper trading | ✅ | ✅ | ✅ |
 | Live trading | ✅ (limited) | ✅ | ✅ |
 | Watchlist + Growth % | ✅ (limited) | ✅ | ✅ |
 | Manual buy/sell buttons | ✅ | ✅ | ✅ |

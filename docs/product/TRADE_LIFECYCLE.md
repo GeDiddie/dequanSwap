@@ -23,14 +23,14 @@ Open positions.
 
 **Target (dequanW parity):** server-side holdings store keyed by the authenticated user.
 
-**Current build:** browser `localStorage` key `dequanswap.holdings` is used as a temporary client cache.
+**Current build:** browser `localStorage` key `dequanswap.holdings.{walletAddress}` is used as a temporary client cache.
 
 ### 3) Sold Tokens ("History")
 Closed positions.
 
 **Target (dequanW parity):** server-side sold history keyed by the authenticated user.
 
-**Current build:** not implemented.
+**Current build:** browser `localStorage` key `dequanswap.soldTokens.{walletAddress}` is used as a temporary client cache.
 
 ---
 
@@ -41,10 +41,15 @@ Closed positions.
    - Once we have a transaction signature from `sendRawTransaction`, the UI reports:
      - `Submitted (sig received)`
      - and shows a Solscan link
+    - Important: a signature is **not** proof the transaction landed on-chain.
+       - If the signature never appears in `getSignatureStatuses`, we treat it as **dropped / not broadcast**.
 
 2. **Confirmation happens asynchronously**
    - The UI does not block the main Snipe panel on confirmation.
-   - Confirmation uses Solana WebSocket subscriptions when available (fast path).
+    - Confirmation uses Solana WebSocket subscriptions when available (fast path), but is always **bounded** by timeouts.
+    - If confirmation takes too long:
+       - **timeout** = signature exists but did not reach confirmed/finalized in the allotted time
+       - **not_found** = signature never appeared on chain (likely dropped)
 
 3. **Holdings update happens on confirmation**
    - Only after confirmed/finalized do we move the token into Holdings.
@@ -54,12 +59,18 @@ Closed positions.
 - App builds/signs the swap transaction (Jupiter route build via dequanW Trading API)
 - App submits tx (gets signature)
    - UI: shows **Submitted (sig received)**
-   - Engine + UI: begin confirmation
+   - Engine + UI: begin confirmation (bounded)
 - Confirmation source-of-truth: **SolanaTracker wallet room** `wallet:<pubkey>` (event-driven)
 - On confirmed:
    - Remove from Monitored
    - Insert/update Holdings
    - Refresh balances
+
+### Failure modes (what users will see)
+- **Signature not found on chain**: the tx was likely dropped (RPC didn’t broadcast, blockhash expired, or network congestion).
+  - UX: user can safely retry.
+- **Timeout**: tx may still confirm later.
+  - UX: show “Still confirming — check explorer” and avoid double-buying blindly.
 
 ### Storage effects
 **Target:** server-side persistence (positions store). The browser may cache for UX.
@@ -83,26 +94,38 @@ Holdings are still valuable because:
 
 ## Sell Flow (Live)
 
-Status:
-- SELL must be completed to match dequanW’s full buy/sell lifecycle.
-
 Lifecycle rules (dequanW parity):
 1. SELL submission returns a signature immediately
 2. Confirmation runs in background
 3. On confirmed SELL:
-   - remove (or reduce) the Holding
    - append to Sold Tokens (History)
+   - update Holdings
 
----
+### Current UX (public dequanSwap)
 
-## Paper Trading Lifecycle
+Beginner-friendly rule: **Sell is a first-class workflow** (not a silent background action).
 
-Paper trades are tracked in the in-browser paper ledger (see the paper trading module).
+1) In **Holdings**, pressing **Sell** flips the right-hand **Snipe** card to a **Sell** back-side.
+   - The Sell form is pre-filled with the selected holding’s mint.
+   - There is a **Return to Snipe** button.
 
-Paper mode is the reference for how Live mode should feel:
-- fast UI feedback
-- clear “position opened/closed” semantics
-- no ambiguous state transitions
+2) The Sell view supports quick percent buttons (25/50/100).
+   - Note: Holdings are tracked by mint only (no size/amount), so partial sells are best-effort UX.
+   - Current behavior:
+     - 100% sell: remove the mint from Holdings
+     - partial sell (<100%): keep the mint in Holdings
+
+3) On confirmed sell:
+   - append a `SoldToken` entry with `{ mint, soldAt, pct, signature, buyMc?, sellMc? }`
+   - refresh balances
+
+### Storage effects (current)
+- Holdings: `dequanswap.holdings.{walletAddress}`
+- Sold Tokens: `dequanswap.soldTokens.{walletAddress}`
+
+Both are:
+- per-wallet (switching wallets changes the view)
+- per-browser/per-device (clearing storage clears history)
 
 ---
 

@@ -16,7 +16,7 @@ This document defines the premium, on-brand help system for dequanSnipe.
 ## A) Contextual Hover Help (Primary for returning users)
 
 Trigger:
-- Hover over any **main section header** (examples: "Live Feed", "Watching", "Holdings", "Snipe", "Paper Positions", etc.).
+- Hover over any **main section header** (examples: "Live Feed", "Watching", "Holdings", "Snipe", etc.).
 
 UI:
 - A subtle **pulsing cyan scope reticle** appears in the corner of the panel.
