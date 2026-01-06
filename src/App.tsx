@@ -681,6 +681,10 @@ function App() {
   // The screen can be opened via the "Upgrade Plan" button.
   const [tierSelectionOpen, setTierSelectionOpen] = useState(false)
 
+  const openTierSelection = useCallback(() => {
+    setTierSelectionOpen(true)
+  }, [])
+
   const requestCloseSplash = useCallback(() => {
     setSplashLeaving((prev) => {
       if (prev) return prev
@@ -1883,7 +1887,18 @@ function App() {
     setWatched((prev) => {
       if (prev.find((t) => t.mint === mintStr)) return prev
       if (prev.length >= gates.maxWatchedTokens) {
-        setError(`Watchlist limit reached for tier (${gates.maxWatchedTokens})`)
+        if (tier === 'free') {
+          const msg = 'Free plan limit reached (3 watched tokens). Upgrade Plan to unlock more watching slots and get a real live 1-second candle chart.'
+          setError(msg)
+          try {
+            window.alert(msg)
+          } catch {
+            // ignore
+          }
+          openTierSelection()
+        } else {
+          setError(`Watchlist limit reached for tier (${gates.maxWatchedTokens})`)
+        }
         return prev
       }
       return [{ mint: mintStr, addedAt: Date.now(), growthPct: 0, lastUpdatedAt: Date.now() }, ...prev]
@@ -1897,7 +1912,7 @@ function App() {
     window.setTimeout(() => void quoteWatchedMint(mintStr), 150)
     window.setTimeout(() => void quoteWatchedMint(mintStr), 650)
     window.setTimeout(() => void quoteWatchedMint(mintStr), 1500)
-  }, [gates.maxWatchedTokens, primeWatchedFromFeed, quoteWatchedMint, watchMintInput])
+  }, [gates.maxWatchedTokens, openTierSelection, primeWatchedFromFeed, quoteWatchedMint, tier, watchMintInput])
 
   const watchMint = useCallback(
     (mintStr: string) => {
@@ -1916,7 +1931,18 @@ function App() {
       setWatched((prev) => {
         if (prev.find((t) => t.mint === m)) return prev
         if (prev.length >= gates.maxWatchedTokens) {
-          setError(`Watchlist limit reached for tier (${gates.maxWatchedTokens})`)
+          if (tier === 'free') {
+            const msg = 'Free plan limit reached (3 watched tokens). Upgrade Plan to unlock more watching slots and get a real live 1-second candle chart.'
+            setError(msg)
+            try {
+              window.alert(msg)
+            } catch {
+              // ignore
+            }
+            openTierSelection()
+          } else {
+            setError(`Watchlist limit reached for tier (${gates.maxWatchedTokens})`)
+          }
           return prev
         }
         return [{ mint: m, addedAt: Date.now(), growthPct: 0, lastUpdatedAt: Date.now() }, ...prev]
@@ -1938,7 +1964,7 @@ function App() {
       window.setTimeout(() => void quoteWatchedMint(m), 650)
       window.setTimeout(() => void quoteWatchedMint(m), 1500)
     },
-    [gates.maxWatchedTokens, primeWatchedFromFeed, quoteWatchedMint, watched.length],
+    [gates.maxWatchedTokens, openTierSelection, primeWatchedFromFeed, quoteWatchedMint, tier, watched.length],
   )
 
   useEffect(() => {
@@ -2960,10 +2986,6 @@ function App() {
     setTierSelectionOpen(false)
   }, [])
 
-  const openTierSelection = useCallback(() => {
-    setTierSelectionOpen(true)
-  }, [])
-
   const refreshSubscriptionStatus = useCallback(async () => {
     try {
       const ws = await ensureWs()
@@ -3294,6 +3316,22 @@ function App() {
                           <button
                             type="button"
                             className="secondary"
+                            onClick={() => {
+                              setSnipeCardSide('snipe')
+                              setTokenMint(holdingDrawerMint)
+                              const panel = document.getElementById('snipe-panel')
+                              panel?.classList.add('animate-glitch-pulse')
+                              setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
+                              window.setTimeout(() => void buy(), 0)
+                            }}
+                            disabled={step !== 'idle'}
+                            title="Snipe this token"
+                          >
+                            Snipe
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary"
                             onClick={async () => {
                               try {
                                 await navigator.clipboard.writeText(holdingDrawerMint)
@@ -3404,6 +3442,22 @@ function App() {
                           </span>
                         </div>
                         <div className="holdingDrawerActions">
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => {
+                              setSnipeCardSide('snipe')
+                              setTokenMint(watchDrawerMint)
+                              const panel = document.getElementById('snipe-panel')
+                              panel?.classList.add('animate-glitch-pulse')
+                              setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
+                              window.setTimeout(() => void buy(), 0)
+                            }}
+                            disabled={step !== 'idle'}
+                            title="Snipe this token"
+                          >
+                            Snipe
+                          </button>
                           <button
                             type="button"
                             className="secondary"
@@ -4132,7 +4186,7 @@ function App() {
                     </div>
 
                     <AnimatePresence mode="popLayout">
-                      {feed.slice(0, 20).map((t) => (
+                      {feed.slice(0, gates.liveFeedLimit).map((t) => (
                         <TokenRow
                           key={t.mint}
                           token={t}

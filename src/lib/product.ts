@@ -5,6 +5,7 @@ export type TierGates = {
   allowFastMode: boolean
   tradeFeeBps: number
   maxWatchedTokens: number
+  liveFeedLimit: number
   quotePollMs: number
 }
 
@@ -24,11 +25,11 @@ export function tierDisplayName(tier: ProductTier): string {
 export function gatesForTier(tier: ProductTier): TierGates {
   switch (tier) {
     case 'free':
-      return { allowLiveTrading: true, allowFastMode: false, tradeFeeBps: 100, maxWatchedTokens: 5, quotePollMs: 4000 }
+      return { allowLiveTrading: true, allowFastMode: false, tradeFeeBps: 100, maxWatchedTokens: 3, liveFeedLimit: 10, quotePollMs: 4000 }
     case 'pro':
-      return { allowLiveTrading: true, allowFastMode: true, tradeFeeBps: 75, maxWatchedTokens: 20, quotePollMs: 800 }
+      return { allowLiveTrading: true, allowFastMode: true, tradeFeeBps: 75, maxWatchedTokens: 20, liveFeedLimit: 20, quotePollMs: 800 }
     case 'elite':
-      return { allowLiveTrading: true, allowFastMode: true, tradeFeeBps: 50, maxWatchedTokens: 999, quotePollMs: 500 }
+      return { allowLiveTrading: true, allowFastMode: true, tradeFeeBps: 50, maxWatchedTokens: 999, liveFeedLimit: 30, quotePollMs: 500 }
   }
 }
 

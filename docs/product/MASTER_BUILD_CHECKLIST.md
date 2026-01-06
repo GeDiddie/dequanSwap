@@ -54,6 +54,10 @@ This is the always-on checklist we use to prevent losing track of MVP vs later w
 ### UI/UX
 - [ ] Legibility palette + hierarchy maintained.
 - [ ] Critical signals remain attention-grabbing but not blinding.
+- [ ] Tiered UX: Free shows Live Feed max 10 tokens + Watching max 3; attempts to exceed show upgrade prompt for real live 1s candle chart.
+- [ ] Update subscription/tier page descriptions to mention: Free limits + "real live 1s candle chart" as a paid feature.
+- [ ] Implement real live 1-second candle chart in Watching + Holdings popout chart (replace current ~5s sparkline proxy).
+- [ ] Popout chart: add direct Snipe button (and later Apex one-tap automation).
 
 ---
 
@@ -62,6 +66,7 @@ This is the always-on checklist we use to prevent losing track of MVP vs later w
 - [ ] Tier gate `allowFastMode` (Pro/Elite only).
 - [ ] Option A: client-only session key arming + revoke.
 - [ ] Delegate-authority swap builder (required for true “no-popup” swaps using WSOL delegation).
+- [ ] Apex automation: pressing Snipe skips the Snipe form and goes straight to wallet signature; if custodial wallet is enabled, buy happens immediately.
 - [ ] Per-trade guardrails: max notional, max slippage, max priority fee.
 - [ ] Allowlist swap programs/routes (reduce malicious route risk).
 - [ ] Allowance remaining meter.
