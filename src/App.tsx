@@ -369,6 +369,14 @@ type HoldingToken = {
   error?: string
   buyMc?: number
   currentMc?: number
+
+  // Quote-based price proxy (scaled bigint stored as string to avoid overflow).
+  // entry* fields are the holding's baseline at buy time.
+  entryPriceProxyScaled?: string
+  lastPriceProxyScaled?: string
+  entryPriceProxy?: number
+  lastPriceProxy?: number
+  proxyGrowthPct?: number
 }
 
 type SoldToken = {
@@ -432,12 +440,50 @@ function parseHoldings(raw: string | null): HoldingToken[] {
         if (typeof r.error === 'string') h.error = r.error
         if (typeof r.buyMc === 'number') h.buyMc = r.buyMc
         if (typeof r.currentMc === 'number') h.currentMc = r.currentMc
+
+        if (typeof r.entryPriceProxyScaled === 'string') h.entryPriceProxyScaled = r.entryPriceProxyScaled
+        if (typeof r.lastPriceProxyScaled === 'string') h.lastPriceProxyScaled = r.lastPriceProxyScaled
+        if (typeof r.entryPriceProxy === 'number') h.entryPriceProxy = r.entryPriceProxy
+        if (typeof r.lastPriceProxy === 'number') h.lastPriceProxy = r.lastPriceProxy
+        if (typeof r.proxyGrowthPct === 'number') h.proxyGrowthPct = r.proxyGrowthPct
         return h
       })
       .filter(Boolean) as HoldingToken[]
   } catch {
     return []
   }
+}
+
+type SeriesPoint = { t: number; v: number }
+
+function clampSeriesPoints(points: SeriesPoint[], maxPoints: number) {
+  if (points.length <= maxPoints) return points
+  return points.slice(points.length - maxPoints)
+}
+
+function seriesTrend(points: SeriesPoint[]): 'up' | 'down' | 'flat' {
+  if (points.length < 2) return 'flat'
+  const a = points[points.length - 2]?.v
+  const b = points[points.length - 1]?.v
+  if (typeof a !== 'number' || typeof b !== 'number') return 'flat'
+  if (b > a) return 'up'
+  if (b < a) return 'down'
+  return 'flat'
+}
+
+function renderSparkline(points: SeriesPoint[], width: number, height: number): string {
+  if (!points.length) return ''
+  const min = Math.min(...points.map((p) => p.v))
+  const max = Math.max(...points.map((p) => p.v))
+  const range = Math.max(1e-9, max - min)
+  const n = points.length
+  return points
+    .map((p, i) => {
+      const x = n === 1 ? 0 : (i / (n - 1)) * (width - 1)
+      const y = (1 - (p.v - min) / range) * (height - 1)
+      return `${x.toFixed(2)},${y.toFixed(2)}`
+    })
+    .join(' ')
 }
 
 function parseSoldTokens(raw: string | null): SoldToken[] {
@@ -888,10 +934,39 @@ function App() {
   const [copiedMint, setCopiedMint] = useState<string>('')
   const [uiNow, setUiNow] = useState<number>(() => Date.now())
 
+  const holdingsMcHistoryRef = useRef<Record<string, SeriesPoint[]>>({})
+  const [holdingDrawerMint, setHoldingDrawerMint] = useState<string>('')
+
   useEffect(() => {
     const id = window.setInterval(() => setUiNow(Date.now()), 2000)
     return () => window.clearInterval(id)
   }, [])
+
+  // Track a lightweight MC history per holding for sparklines (bounded).
+  useEffect(() => {
+    const now = Date.now()
+    const history = holdingsMcHistoryRef.current
+    const keep = new Set<string>()
+
+    for (const h of holdings) {
+      keep.add(h.mint)
+      const mc = typeof h.currentMc === 'number' && Number.isFinite(h.currentMc) ? h.currentMc : undefined
+      if (typeof mc !== 'number') continue
+
+      const prev = history[h.mint] ?? []
+      const last = prev.length ? prev[prev.length - 1] : null
+
+      // Feed ticks ~5s; avoid adding duplicate/too-frequent points.
+      if (last && now - last.t < 3500) continue
+      if (last && last.v === mc) continue
+
+      history[h.mint] = clampSeriesPoints([...prev, { t: now, v: mc }], 60)
+    }
+
+    for (const mint of Object.keys(history)) {
+      if (!keep.has(mint)) delete history[mint]
+    }
+  }, [holdings])
 
   const dequanwServerOk = useMemo(() => {
     const base = dequanwDashBase.trim()
@@ -943,7 +1018,7 @@ function App() {
   )
 
   const addHolding = useCallback(
-    (mint: string) => {
+    (mint: string, meta?: Partial<HoldingToken>) => {
       const m = mint.trim()
       if (!m) return
 
@@ -963,6 +1038,12 @@ function App() {
                   liquidityStatus: h.liquidityStatus ?? snap.liquidityStatus,
                   buyMc: h.buyMc ?? buyMc,
                   currentMc: snap.current ?? h.currentMc,
+
+                  entryPriceProxyScaled: h.entryPriceProxyScaled ?? meta?.entryPriceProxyScaled,
+                  lastPriceProxyScaled: h.lastPriceProxyScaled ?? meta?.lastPriceProxyScaled,
+                  entryPriceProxy: h.entryPriceProxy ?? meta?.entryPriceProxy,
+                  lastPriceProxy: h.lastPriceProxy ?? meta?.lastPriceProxy,
+                  proxyGrowthPct: h.proxyGrowthPct ?? meta?.proxyGrowthPct,
                 }
               : h,
           )
@@ -977,6 +1058,12 @@ function App() {
             liquidityStatus: snap.liquidityStatus,
             buyMc,
             currentMc: snap.current,
+
+            entryPriceProxyScaled: meta?.entryPriceProxyScaled,
+            lastPriceProxyScaled: meta?.lastPriceProxyScaled,
+            entryPriceProxy: meta?.entryPriceProxy,
+            lastPriceProxy: meta?.lastPriceProxy,
+            proxyGrowthPct: meta?.proxyGrowthPct,
           },
           ...prev,
         ]
@@ -987,6 +1074,17 @@ function App() {
     },
     [getFeedMcSnapshot],
   )
+
+  const closeHoldingDrawer = useCallback(() => setHoldingDrawerMint(''), [])
+
+  useEffect(() => {
+    if (!holdingDrawerMint) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeHoldingDrawer()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [closeHoldingDrawer, holdingDrawerMint])
 
   const removeHolding = useCallback((mint: string) => {
     setHoldings((prev) => prev.filter((h) => h.mint !== mint))
@@ -1616,6 +1714,10 @@ function App() {
         const amountIn = BigInt(quote.data.amountIn)
         const priceProxyScaled = computePriceProxyScaled(amountIn, amountOutBaseUnits)
 
+        // Best-effort numeric proxy for UI display.
+        const proxyNum =
+          bigintAbs(priceProxyScaled) <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(priceProxyScaled) / Number(PRICE_PROXY_SCALE) : undefined
+
         setWatched((prev) =>
           prev.map((x) => {
             if (x.mint !== mint) return x
@@ -1647,6 +1749,42 @@ function App() {
                   : x.lastPriceProxy,
               growthPct: typeof growthPct === 'number' && Number.isFinite(growthPct) ? growthPct : x.growthPct ?? 0,
               lastUpdatedAt: Date.now(),
+            }
+          }),
+        )
+
+        // Mirror quote-proxy updates into Holdings too (Phase 1 requirement).
+        setHoldings((prev) =>
+          prev.map((h) => {
+            if (h.mint !== mint) return h
+            const entryScaled = h.entryPriceProxyScaled ? bigintFromString(h.entryPriceProxyScaled) : priceProxyScaled
+
+            let growthPct: number | undefined
+            if (entryScaled > 0n) {
+              const delta = priceProxyScaled - entryScaled
+              const pctTimes100 = (delta * 10000n) / entryScaled
+              const maxPctTimes100 = 100_000_000n
+              const clamped =
+                pctTimes100 > maxPctTimes100 ? maxPctTimes100 : pctTimes100 < -maxPctTimes100 ? -maxPctTimes100 : pctTimes100
+              growthPct = Number(clamped) / 100
+            }
+
+            const entryNum =
+              bigintAbs(entryScaled) <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(entryScaled) / Number(PRICE_PROXY_SCALE) : h.entryPriceProxy
+
+            const changed =
+              h.lastPriceProxyScaled !== priceProxyScaled.toString() ||
+              h.entryPriceProxyScaled !== (h.entryPriceProxyScaled ?? entryScaled.toString()) ||
+              h.proxyGrowthPct !== (typeof growthPct === 'number' && Number.isFinite(growthPct) ? growthPct : h.proxyGrowthPct)
+            if (!changed) return h
+
+            return {
+              ...h,
+              entryPriceProxyScaled: h.entryPriceProxyScaled ?? entryScaled.toString(),
+              lastPriceProxyScaled: priceProxyScaled.toString(),
+              entryPriceProxy: h.entryPriceProxy ?? entryNum,
+              lastPriceProxy: proxyNum ?? h.lastPriceProxy,
+              proxyGrowthPct: typeof growthPct === 'number' && Number.isFinite(growthPct) ? growthPct : h.proxyGrowthPct,
             }
           }),
         )
@@ -1941,14 +2079,15 @@ function App() {
   const pollQuotes = useCallback(async () => {
     if (Date.now() < userRateLimitUntilMs) return
     const watchedMints = watched.slice(0, gates.maxWatchedTokens).map((x) => x.mint)
-    const mints = Array.from(new Set([...watchedMints]))
+    const holdingMints = holdings.slice(0, 12).map((h) => h.mint)
+    const mints = Array.from(new Set([...watchedMints, ...holdingMints]))
     if (!mints.length) return
 
     // Sequential polling keeps traffic predictable.
     for (const mint of mints) {
       await quoteWatchedMint(mint)
     }
-  }, [gates.maxWatchedTokens, quoteWatchedMint, watched, userRateLimitUntilMs])
+  }, [gates.maxWatchedTokens, holdings, quoteWatchedMint, watched, userRateLimitUntilMs])
 
   useEffect(() => {
     // Count unique trigger hits per session.
@@ -2093,6 +2232,16 @@ function App() {
 
       if (!quote.success || !quote.data?.route) throw new Error('Quote failed')
 
+      // Phase 1: capture a quote-based entry proxy for holdings (best-effort).
+      let entryPriceProxyScaled: bigint | null = null
+      try {
+        if (quote.data?.amountIn && quote.data?.amountOut) {
+          entryPriceProxyScaled = computePriceProxyScaled(BigInt(quote.data.amountIn), BigInt(quote.data.amountOut))
+        }
+      } catch {
+        entryPriceProxyScaled = null
+      }
+
       const serializedQuote = quote.data.route.serializedQuote
       if (!serializedQuote) {
         throw new Error('Quote missing route.serializedQuote (server must include it for build_swap_tx)')
@@ -2129,7 +2278,7 @@ function App() {
       setStep('signing')
       const unsignedTx = deserializeTx(txBase64)
 
-      const confirmInBackground = (signature: string, mintBase58: string) => {
+      const confirmInBackground = (signature: string, mintBase58: string, entryProxyScaled: bigint | null) => {
         setBgTx({ sig: signature, startedAt: Date.now(), status: 'confirming' })
         pushDebugEvent({ area: 'trade', level: 'info', message: 'Tx submitted (bg confirm)', detail: signature })
         void (async () => {
@@ -2162,7 +2311,19 @@ function App() {
               prev && prev.sig === signature ? { ...prev, status: 'confirmed', finishedAt: Date.now() } : prev,
             )
             pushDebugEvent({ area: 'trade', level: 'info', message: 'Bg confirm confirmed', detail: signature })
-            addHolding(mintBase58)
+
+            const entryNum =
+              entryProxyScaled && bigintAbs(entryProxyScaled) <= BigInt(Number.MAX_SAFE_INTEGER)
+                ? Number(entryProxyScaled) / Number(PRICE_PROXY_SCALE)
+                : undefined
+
+            addHolding(mintBase58, {
+              entryPriceProxyScaled: entryProxyScaled ? entryProxyScaled.toString() : undefined,
+              lastPriceProxyScaled: entryProxyScaled ? entryProxyScaled.toString() : undefined,
+              entryPriceProxy: entryNum,
+              lastPriceProxy: entryNum,
+              proxyGrowthPct: 0,
+            })
             await refreshBalances()
             await refreshBotWalletBalance()
           } catch (e) {
@@ -2235,7 +2396,7 @@ function App() {
 
         // UX: treat signature receipt as immediate success, confirm asynchronously.
         setStep('idle')
-        confirmInBackground(signature, mint.toBase58())
+        confirmInBackground(signature, mint.toBase58(), entryPriceProxyScaled)
         return
       }
 
@@ -2250,7 +2411,7 @@ function App() {
 
       // UX: treat signature receipt as immediate success, confirm asynchronously.
       setStep('idle')
-      confirmInBackground(signature, mint.toBase58())
+      confirmInBackground(signature, mint.toBase58(), entryPriceProxyScaled)
     } catch (e) {
       setSnipePrompt('')
       recordTradingApiError(e)
@@ -3029,6 +3190,115 @@ function App() {
 
       {!splashOpen && !tierSelectionOpen ? (
         <>
+          {holdingDrawerMint ? (
+            <div
+              className="holdingDrawerOverlay"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Holding details"
+              onClick={closeHoldingDrawer}
+            >
+              <div className="holdingDrawer" onClick={(e) => e.stopPropagation()}>
+                {(() => {
+                  const h = holdings.find((x) => x.mint === holdingDrawerMint)
+                  const series = holdingsMcHistoryRef.current[holdingDrawerMint] ?? []
+                  const points = renderSparkline(series, 560, 160)
+                  const pnl = h ? computeGrowthPct(h.buyMc, h.currentMc) : undefined
+                  const tokenLabel = h ? ((h.symbol || h.name || '').trim() || shortPk(h.mint)) : shortPk(holdingDrawerMint)
+
+                  return (
+                    <>
+                      <div className="holdingDrawerHead">
+                        <div className="holdingDrawerTitle">
+                          {tokenLabel}
+                          <span className="holdingDrawerMint mono" title={holdingDrawerMint}>
+                            {shortPk(holdingDrawerMint)}
+                          </span>
+                        </div>
+                        <div className="holdingDrawerActions">
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(holdingDrawerMint)
+                                setCopiedMint(holdingDrawerMint)
+                                setTimeout(() => setCopiedMint(''), 2000)
+                              } catch {
+                                // ignore
+                              }
+                            }}
+                          >
+                            {copiedMint === holdingDrawerMint ? 'Copied' : 'Copy mint'}
+                          </button>
+                          <button type="button" className="secondary" onClick={closeHoldingDrawer}>
+                            Close
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="holdingDrawerChart">
+                        {points ? (
+                          <svg width="100%" height="160" viewBox="0 0 560 160" preserveAspectRatio="none">
+                            <polyline
+                              points={points}
+                              fill="none"
+                              stroke="rgba(45,226,230,0.9)"
+                              strokeWidth="2"
+                              strokeLinejoin="round"
+                              strokeLinecap="round"
+                            />
+                          </svg>
+                        ) : (
+                          <div className="holdingDrawerEmpty">No chart data yet.</div>
+                        )}
+                      </div>
+
+                      {h ? (
+                        <div className="holdingDrawerGrid">
+                          <div className="holdingDrawerStat">
+                            <div className="k">Buy time</div>
+                            <div className="v mono">{formatTs(h.boughtAt)}</div>
+                          </div>
+                          <div className="holdingDrawerStat">
+                            <div className="k">Buy MC</div>
+                            <div className="v mono">{formatUsd0(h.buyMc)}</div>
+                          </div>
+                          <div className="holdingDrawerStat">
+                            <div className="k">Current MC</div>
+                            <div className="v mono">{formatUsd0(h.currentMc)}</div>
+                          </div>
+                          <div className="holdingDrawerStat">
+                            <div className="k">PnL</div>
+                            <div
+                              className={
+                                typeof pnl === 'number' && pnl > 0
+                                  ? 'v mono pos'
+                                  : typeof pnl === 'number' && pnl < 0
+                                    ? 'v mono neg'
+                                    : 'v mono'
+                              }
+                            >
+                              {typeof pnl === 'number' && Number.isFinite(pnl) ? `${pnl.toFixed(2)}%` : '—'}
+                            </div>
+                          </div>
+                          <div className="holdingDrawerStat">
+                            <div className="k">Quote proxy</div>
+                            <div className="v mono">
+                              {typeof h.proxyGrowthPct === 'number' && Number.isFinite(h.proxyGrowthPct)
+                                ? `${h.proxyGrowthPct.toFixed(2)}%`
+                                : '—'}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  )
+                })()}
+              </div>
+            </div>
+          ) : null}
+
           {walletActionHint ? (
         <div className="toast toastWarn" role="status" aria-live="polite">
           <div className="toastTitle">
@@ -3197,6 +3467,7 @@ function App() {
                       <div className="watchHeaderCell watchHeaderCellCenter">Buy Age</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Buy MC</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Current MC</div>
+                      <div className="watchHeaderCell watchHeaderCellCenter">Chart</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">PnL%</div>
                       <div className="watchHeaderCell watchHeaderCellRight">Actions</div>
                     </div>
@@ -3209,6 +3480,9 @@ function App() {
                         const sellingThis = sellMintInFlight === h.mint && sellStep !== 'idle'
                         const tokenLabel = (h.symbol || h.name || '').trim() || shortPk(h.mint)
                         const rugged = isTokenRugged(h)
+                        const series = holdingsMcHistoryRef.current[h.mint] ?? []
+                        const points = renderSparkline(series, 92, 26)
+                        const trend = seriesTrend(series)
                         return (
                           <div key={h.mint} className={isHot ? 'watchRow watchRowHoldings watchRowHot' : 'watchRow watchRowHoldings'}>
                             <div className="watchRowHeat" />
@@ -3261,6 +3535,35 @@ function App() {
                             </div>
                             <div className="watchCell watchCellCenter mono" data-label="Buy MC">{formatUsd0(h.buyMc)}</div>
                             <div className="watchCell watchCellCenter mono" data-label="Current MC">{formatUsd0(h.currentMc)}</div>
+                            <div className="watchCell watchCellCenter" data-label="Chart">
+                              <button
+                                type="button"
+                                className="sparklineBtn"
+                                onClick={() => setHoldingDrawerMint(h.mint)}
+                                title="Open chart"
+                              >
+                                {points ? (
+                                  <svg width="92" height="26" viewBox="0 0 92 26" preserveAspectRatio="none">
+                                    <polyline
+                                      points={points}
+                                      fill="none"
+                                      stroke={
+                                        trend === 'up'
+                                          ? 'rgba(0,255,163,0.9)'
+                                          : trend === 'down'
+                                            ? 'rgba(248,81,73,0.9)'
+                                            : 'rgba(234,242,255,0.6)'
+                                      }
+                                      strokeWidth="2"
+                                      strokeLinejoin="round"
+                                      strokeLinecap="round"
+                                    />
+                                  </svg>
+                                ) : (
+                                  <span className="sparklineEmpty">—</span>
+                                )}
+                              </button>
+                            </div>
                             <div
                               className={
                                 typeof pnl === 'number' && pnl > 0

@@ -306,7 +306,7 @@ body::before {
 }
 
 .watchHeaderRowHoldings {
-  grid-template-columns: 1.2fr 0.55fr 0.9fr 0.9fr 0.7fr 168px;
+  grid-template-columns: 1.2fr 0.55fr 0.9fr 0.9fr 110px 0.7fr 168px;
 }
 
 .watchHeaderCell {
@@ -348,7 +348,134 @@ body::before {
 }
 
 .watchRowHoldings {
-  grid-template-columns: 1.2fr 0.55fr 0.9fr 0.9fr 0.7fr 168px;
+  grid-template-columns: 1.2fr 0.55fr 0.9fr 0.9fr 110px 0.7fr 168px;
+}
+
+.sparklineBtn {
+  appearance: none;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(10, 11, 16, 0.55);
+  border-radius: 10px;
+  padding: 4px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.sparklineBtn:hover {
+  border-color: rgba(45,226,230,0.35);
+  box-shadow: 0 0 14px rgba(45,226,230,0.10);
+  transform: translateY(-1px);
+}
+
+.sparklineBtn:active {
+  transform: translateY(0px);
+}
+
+.sparklineEmpty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.holdingDrawerOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.65);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.holdingDrawer {
+  width: min(920px, 100%);
+  max-height: min(82vh, 860px);
+  overflow: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(10, 11, 16, 0.92);
+  box-shadow: 0 20px 80px rgba(0,0,0,0.65);
+  padding: 14px;
+}
+
+.holdingDrawerHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.holdingDrawerTitle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+
+.holdingDrawerMint {
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.holdingDrawerActions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.holdingDrawerChart {
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px;
+  background: rgba(10, 11, 16, 0.55);
+  overflow: hidden;
+  padding: 10px;
+}
+
+.holdingDrawerEmpty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 18px 10px;
+}
+
+.holdingDrawerGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.holdingDrawerStat {
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px;
+  background: rgba(10, 11, 16, 0.55);
+  padding: 10px;
+}
+
+.holdingDrawerStat .k {
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.holdingDrawerStat .v {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+@media (max-width: 900px) {
+  .holdingDrawerGrid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .watchRow:hover {

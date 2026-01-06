@@ -38,7 +38,14 @@ Help system UX spec lives in: [HELP_SYSTEM.md](HELP_SYSTEM.md)
 
 ## Ship Now (Current Build)
 
-## 0) Start Here — First Video to Produce
+These are the **videos we should eventually record**, but video production can happen last.
+For now, keep this list accurate so every `HelpDot` can point to a real ID.
+
+---
+
+## MVP / Phase 1 (Must-Have Help IDs)
+
+### 0) Start Here — First Video to Produce (when we start recording)
 
 ### `live-feed-explainer`
 - Output file: `live-feed-explainer.mp4`
@@ -247,17 +254,79 @@ Safety notes:
 	2) Show timeline entry
 - Key line (overlay): “Actionable errors”
 
+### 20) `powered-by-status-dot`
+- Title: “Powered By: Green = Fresh”
+- Where used: topbar “powered by dequan” dot
+- Hook (overlay): “Green = connected”
+- Show:
+	1) Dot red when feed is stale/error
+	2) Dot flips green when feed is fresh
+- Key line (overlay): “Live feed health”
+
+### 21) `rugged-no-route`
+- Title: “RUGGED / No Route”
+- Where used: sell error UX + RUGGED badges
+- Hook (overlay): “No liquidity = no sell”
+- Show:
+	1) A rugged token shows RUGGED
+	2) Sell explains “no route/liquidity” instead of raw Jupiter errors
+- Key line (overlay): “Clear, safe messaging”
+
+### 22) `holdings-sell-workflow`
+- Title: “Holdings → Sell (Flip Card)”
+- Where used: Holdings sell button + Sell view
+- Hook (overlay): “Sell from Holdings”
+- Show: click Sell in Holdings → right panel flips to Sell → quick % buttons → Return to Snipe
+- Key line (overlay): “Fast manual exits”
+
+### 23) `holdings-quick-sell-buttons`
+- Title: “Quick Sell: 25 / 50 / 100”
+- Where used: Sell view
+- Hook (overlay): “One tap sells”
+- Show: tap 25/50/100, then Sell
+- Key line (overlay): “Percent-based sells”
+
+### 24) `watching-token-copy`
+- Title: “Copy Token Address (Hover + Click)”
+- Where used: Watching + Holdings token column
+- Hook (overlay): “Copy in 1 click”
+- Show: hover token → flips to short mint → click copies full mint
+- Key line (overlay): “No typing addresses”
+
+### 25) `snipe-clear`
+- Title: “Clear Snipe Form”
+- Where used: Snipe panel Clear button
+- Hook (overlay): “Reset instantly”
+- Show: click Clear → mint/amount/slippage reset + messages cleared
+- Key line (overlay): “No stale state”
+
+### 26) `mobile-minimalist-layout`
+- Title: “Mobile Layout (Minimalist)”
+- Where used: general onboarding/help
+- Hook (overlay): “Works on mobile”
+- Show: small screen: Command Center moves top, rows stack with labels, big tap targets
+- Key line (overlay): “Built for phone browsers”
+
+### 27) `tiered-auth-free-vs-paid`
+- Title: “Free vs Paid Auth (Why Account Exists)”
+- Where used: Tier selection + account-required modal
+- Hook (overlay): “Free = wallet-only”
+- Show: free tier uses wallet auth; paid flows require account (email code) for subscription linkage
+- Key line (overlay): “Safer subscriptions”
+
 ---
 
-## Planned / Backlog (Don’t record yet unless we enable the feature)
+---
 
-### 17) `fast-mode-arm-and-revoke`
+## Later / Backlog (Don’t record until features ship)
+
+### `fast-mode-arm-and-revoke`
 - Title: “Arm Fast Mode (Then Revoke)”
 - Hook (overlay): “1 signature → many swaps”
 - Show: arming tx, timer starts, revoke
 - Notes: record once delegate-authority swap builder is in place (otherwise it’s confusing)
 
-### 18) `tp-sl-rules`
+### `tp-sl-rules`
 - Title: “Take Profit / Stop Loss (Rules)”
 - Hook (overlay): “Simple exits, automated”
 - Show: set TP/SL, demonstrate simulated trigger
