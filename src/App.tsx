@@ -350,6 +350,7 @@ type WatchedToken = {
   name?: string
   entryMc?: number
   currentMc?: number
+  mcUpdatedAt?: number
   basePriceProxyScaled?: string
   lastPriceProxyScaled?: string
   basePriceProxy?: number
@@ -406,6 +407,7 @@ function parseWatchedTokens(raw: string | null): WatchedToken[] {
         if (typeof r.name === 'string') wt.name = r.name
         if (typeof r.entryMc === 'number') wt.entryMc = r.entryMc
         if (typeof r.currentMc === 'number') wt.currentMc = r.currentMc
+        if (typeof r.mcUpdatedAt === 'number') wt.mcUpdatedAt = r.mcUpdatedAt
         if (typeof r.basePriceProxyScaled === 'string') wt.basePriceProxyScaled = r.basePriceProxyScaled
         if (typeof r.lastPriceProxyScaled === 'string') wt.lastPriceProxyScaled = r.lastPriceProxyScaled
         if (typeof r.basePriceProxy === 'number') wt.basePriceProxy = r.basePriceProxy
@@ -1167,6 +1169,8 @@ function App() {
           const nextSymbol = w.symbol ?? feedSymbol
           const nextName = w.name ?? feedName
 
+          const mcChanged = nextEntry !== w.entryMc || nextCurrent !== w.currentMc
+
           const changed =
             nextEntry !== w.entryMc ||
             nextCurrent !== w.currentMc ||
@@ -1181,6 +1185,7 @@ function App() {
             name: nextName,
             entryMc: nextEntry,
             currentMc: nextCurrent,
+            mcUpdatedAt: mcChanged ? Date.now() : w.mcUpdatedAt,
             growthPct: nextGrowth ?? w.growthPct,
             lastUpdatedAt: Date.now(),
           }
@@ -1927,6 +1932,8 @@ function App() {
         const nextSymbol = w.symbol ?? feedSymbol
         const nextName = w.name ?? feedName
 
+        const mcChanged = nextEntry !== w.entryMc || nextCurrent !== w.currentMc
+
         const changed =
           nextEntry !== w.entryMc ||
           nextCurrent !== w.currentMc ||
@@ -1941,6 +1948,7 @@ function App() {
           name: nextName,
           entryMc: nextEntry,
           currentMc: nextCurrent,
+          mcUpdatedAt: mcChanged ? Date.now() : w.mcUpdatedAt,
           growthPct: nextGrowth ?? w.growthPct,
           lastUpdatedAt: Date.now(),
         }
@@ -3346,6 +3354,7 @@ function App() {
                   const quoteGrowth = t && typeof t.growthPct === 'number' ? t.growthPct : undefined
                   const tokenLabel = t ? ((t.symbol || t.name || '').trim() || shortPk(t.mint)) : shortPk(watchDrawerMint)
                   const addedAt = typeof t?.addedAt === 'number' ? t.addedAt : null
+                  const mcAgeMs = typeof t?.mcUpdatedAt === 'number' ? Date.now() - t!.mcUpdatedAt! : null
 
                   return (
                     <>
@@ -3401,11 +3410,17 @@ function App() {
                           <div className="v mono">{addedAt ? formatAgeShort(Date.now() - addedAt) : '—'}</div>
                         </div>
                         <div className="holdingDrawerStat">
+                          <div className="k">MC updated</div>
+                          <div className="v mono" title="Market cap updates only when dequanW provides an MC snapshot for this mint">
+                            {typeof mcAgeMs === 'number' ? `${formatAgeShort(mcAgeMs)} ago` : '—'}
+                          </div>
+                        </div>
+                        <div className="holdingDrawerStat">
                           <div className="k">Entry MC</div>
                           <div className="v mono">{formatUsd0(t?.entryMc)}</div>
                         </div>
                         <div className="holdingDrawerStat">
-                          <div className="k">Current MC</div>
+                          <div className="k">Current MC (feed)</div>
                           <div className="v mono">{formatUsd0(t?.currentMc)}</div>
                         </div>
                         <div className="holdingDrawerStat">
@@ -3828,7 +3843,12 @@ function App() {
                       <div className="watchHeaderCell watchHeaderCellLeft">Token</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Age</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Entry MC</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Current MC</div>
+                      <div
+                        className="watchHeaderCell watchHeaderCellCenter"
+                        title="Market cap updates only when dequanW provides an MC snapshot for this mint"
+                      >
+                        Current MC (feed)
+                      </div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Chart</div>
                       <div className="watchHeaderCell watchHeaderCellCenter">Growth</div>
                       <div className="watchHeaderCell watchHeaderCellRight">Actions</div>
@@ -3842,6 +3862,8 @@ function App() {
                         const ruggedLabel = isTokenRugged({ error: t.error ?? null, isRugged: (t as any).isRugged ?? null, liquidityStatus: (t as any).liquidityStatus ?? null }) ? 'RUGGED' : ''
                         const ageMs = Date.now() - (typeof t.addedAt === 'number' ? t.addedAt : Date.now())
                         const tokenLabel = (t.symbol || t.name || '').trim() || shortPk(t.mint)
+                        const mcAgeMs = typeof t.mcUpdatedAt === 'number' ? Date.now() - t.mcUpdatedAt : null
+                        const mcIsStale = typeof mcAgeMs === 'number' && mcAgeMs > 60_000
                         const series = watchingMcHistoryRef.current[t.mint] ?? []
                         const points = renderSparkline(series, 92, 26)
                         const trend = seriesTrend(series)
@@ -3900,7 +3922,19 @@ function App() {
                             </div>
                             <div className="watchCell watchCellCenter mono" data-label="Age">{formatAgeShort(ageMs)}</div>
                             <div className="watchCell watchCellCenter mono" data-label="Entry MC">{formatUsd0(t.entryMc)}</div>
-                            <div className="watchCell watchCellCenter mono" data-label="Current MC">{formatUsd0(t.currentMc)}</div>
+                            <div
+                              className="watchCell watchCellCenter mono"
+                              data-label="Current MC (feed)"
+                              title={
+                                mcIsStale
+                                  ? `MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). MC only updates when this mint appears in the dequanW feed snapshot.`
+                                  : 'MC updates only when this mint appears in the dequanW feed snapshot.'
+                              }
+                              style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
+                            >
+                              <span>{formatUsd0(t.currentMc)}</span>
+                              {mcIsStale ? <span className="tokenRowBadge tokenRowBadgeWarm">STALE</span> : null}
+                            </div>
                             <div className="watchCell watchCellCenter" data-label="Chart">
                               <button
                                 type="button"
@@ -3909,7 +3943,7 @@ function App() {
                                   setHoldingDrawerMint('')
                                   setWatchDrawerMint(t.mint)
                                 }}
-                                title="Open chart"
+                                title="Open chart (MC points update ~5s when snapshots are available)"
                               >
                                 {points ? (
                                   <svg width="92" height="26" viewBox="0 0 92 26" preserveAspectRatio="none">
