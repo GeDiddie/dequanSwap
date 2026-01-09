@@ -54,6 +54,7 @@ import {
 } from '@solana/spl-token'
 
 import splashVideoUrl from './media/sol sniper.mp4'
+import powerupAudioUrl from './media/powerup.wav'
 
 const CandlesChartLazy = lazy(() => import('./components/CandlesChart').then((m) => ({ default: m.CandlesChart })))
 
@@ -371,8 +372,24 @@ function formatAgeShort(ms: number) {
 }
 
 function toEpochMs(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const normalizeEpoch = (n: number): number | undefined => {
+    if (!Number.isFinite(n)) return undefined
+    // Heuristic: dequanW endpoints may return epoch seconds or epoch ms.
+    // - epoch seconds are ~1e9
+    // - epoch ms are ~1e12
+    if (n > 0 && n < 50_000_000_000) return n * 1000
+    return n
+  }
+
+  if (typeof value === 'number') return normalizeEpoch(value)
   if (typeof value === 'string' && value.trim()) {
+    // Numeric string epochs (seconds or ms).
+    if (/^\d+(?:\.\d+)?$/.test(value.trim())) {
+      const asNum = Number(value)
+      const ms = normalizeEpoch(asNum)
+      if (typeof ms === 'number') return ms
+    }
+
     const ms = Date.parse(value)
     if (Number.isFinite(ms)) return ms
   }
@@ -789,6 +806,7 @@ function App() {
   const [splashOpen, setSplashOpen] = useState(true)
   const [splashLeaving, setSplashLeaving] = useState(false)
   const [splashVideoFailed, setSplashVideoFailed] = useState(false)
+  const splashAudioRef = useRef<HTMLAudioElement | null>(null)
 
   // Do not force the tier selection screen on load; let users enter the app immediately.
   // The screen can be opened via the "Upgrade Plan" button.
@@ -4845,18 +4863,30 @@ function App() {
           <div className="splashCard" onClick={(e) => e.stopPropagation()}>
             <div className="splashTaglineTop">FIRST IN</div>
             {!splashVideoFailed ? (
-              <video
-                className="splashMedia"
-                autoPlay
-                muted
-                playsInline
-                loop={false}
-                preload="auto"
-                onError={() => setSplashVideoFailed(true)}
-                onEnded={() => requestCloseSplash()}
-              >
-                <source src={splashVideoUrl} type="video/mp4" />
-              </video>
+              <>
+                <video
+                  className="splashMedia"
+                  autoPlay
+                  muted
+                  playsInline
+                  loop={false}
+                  preload="auto"
+                  onError={() => setSplashVideoFailed(true)}
+                  onEnded={() => requestCloseSplash()}
+                  onPlay={() => {
+                    if (splashAudioRef.current) {
+                      splashAudioRef.current.play().catch(() => {
+                        // Ignore autoplay errors (browser policy)
+                      })
+                    }
+                  }}
+                >
+                  <source src={splashVideoUrl} type="video/mp4" />
+                </video>
+                <audio ref={splashAudioRef} preload="auto">
+                  <source src={powerupAudioUrl} type="audio/wav" />
+                </audio>
+              </>
             ) : (
               <div className="splashMedia splashMediaFallback">Initializing…</div>
             )}
@@ -5903,10 +5933,6 @@ function App() {
                     key={t.mint}
                     token={t}
                     nowMs={uiNow}
-                    onLoad={(mint) => {
-                      setTokenMint(mint)
-                      void refreshBalances()
-                    }}
                     onWatch={watchMint}
                     onSnipe={openSnipePopup}
                     disabled={step !== 'idle'}

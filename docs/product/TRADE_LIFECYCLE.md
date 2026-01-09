@@ -107,7 +107,10 @@ Beginner-friendly rule: **Sell is a first-class workflow** (not a silent backgro
 
 1) In **Holdings**, pressing **Sell** flips the right-hand **Snipe** card to a **Sell** back-side.
    - The Sell form is pre-filled with the selected holding’s mint.
-   - There is a **Return to Snipe** button.
+   - The UI uses a two-button **Snipe/Sell rocker switch** on both sides of the flip card:
+     - active side is neon-lit (green for Snipe, red for Sell)
+     - inactive side is grey-but-readable
+     - clicking the inactive side flips the card (Snipe ⇄ Sell)
 
 2) The Sell view supports quick percent buttons (25/50/100).
    - Note: Holdings are tracked by mint only (no size/amount), so partial sells are best-effort UX.
@@ -118,6 +121,10 @@ Beginner-friendly rule: **Sell is a first-class workflow** (not a silent backgro
 3) On confirmed sell:
    - append a `SoldToken` entry with `{ mint, soldAt, pct, signature, buyMc?, sellMc? }`
    - refresh balances
+
+Implementation notes:
+- The rocker switch styling is in `src/App.css` under `/* Popout Snipe/Sell rocker switch */`.
+- The rocker switch markup is rendered on both card faces in `src/App.tsx`.
 
 ### Storage effects (current)
 - Holdings: `dequanswap.holdings.{walletAddress}`

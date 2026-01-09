@@ -28,3 +28,6 @@ dev-docs/
 
 # Environment files with secrets
 .env
+
+# Windows downloaded-file metadata (NTFS alternate data streams)
+*:Zone.Identifier

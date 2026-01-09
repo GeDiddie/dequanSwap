@@ -65,9 +65,9 @@ credentials-file: /home/g1/.cloudflared/5e611e8c-f66c-499d-a7fb-ef66c0a0c3a2.jso
 protocol: http2
 
 ingress:
-  # dequanW dashboard + JSON API (8901)
+  # dequanW API-Lite (fast feed/watching endpoints on 8912)
   - hostname: dequanw-api.dequan.xyz
-    service: http://localhost:8901
+    service: http://localhost:8912
 
   # trading API / WebSocket (8900)
   - hostname: dequantrade-ws.dequan.xyz

@@ -20,7 +20,6 @@ interface TokenRowProps {
     liquidityRemovedReason?: string
     error?: string
   }
-  onLoad: (mint: string) => void
   onWatch: (mint: string) => void
   onSnipe: (mint: string) => void
   disabled: boolean
@@ -40,13 +39,13 @@ const formatAge = (ms: number) => {
   return `${hr}h ${remMin}m`
 }
 
-export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSnipe, disabled, nowMs }) => {
+export const TokenRow: React.FC<TokenRowProps> = ({ token, onWatch, onSnipe, disabled, nowMs }) => {
   const hasGrowth = typeof token.mcGrowthPct === 'number' && Number.isFinite(token.mcGrowthPct)
   const growth = hasGrowth ? (token.mcGrowthPct as number) : 0
   const prevGrowthRef = useRef(growth)
   const rowRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = React.useState(false)
-  const [ruggedClickedButton, setRuggedClickedButton] = React.useState<'load' | 'watch' | 'snipe' | null>(null)
+  const [ruggedClickedButton, setRuggedClickedButton] = React.useState<'watch' | 'snipe' | null>(null)
   
   const heatWidth = Math.min(Math.max(growth, 0), 100)
   const isHot = growth > 50
@@ -220,18 +219,6 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
 
       {/* ACTIONS */}
       <div className={`tokenRowActions ${isHovered ? 'tokenRowActionsOn' : ''}`}>
-        <button
-          onClick={() => {
-            if (isRugged) {
-              setRuggedClickedButton('load')
-              return
-            }
-            onLoad(token.mint)
-          }}
-          className="tokenRowBtn"
-        >
-          {ruggedClickedButton === 'load' ? 'RUGGED' : 'Load'}
-        </button>
         <button
           onClick={() => {
             if (isRugged) {
