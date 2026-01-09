@@ -23,8 +23,11 @@ This is the always-on checklist we use to prevent losing track of MVP vs later w
 - [ ] Confirm correct Pages project name: `dequanswap`.
 - [ ] If running Trading WS from home (Phase 0), set up Cloudflare Tunnel:
   - [ ] Cloudflare Tunnel routes `wss://<trading-ws-host>` → local `http://127.0.0.1:8900` (WebSocket upgrade must work).
+  - [ ] Cloudflare Tunnel routes `wss://dequandata.dequan.xyz` → local `http://127.0.0.1:8913` (Data Gateway).
   - [ ] Confirm public health: `https://<trading-ws-host>/healthz`.
   - [ ] Update UI env: `VITE_DEQUANW_WS_URL=wss://<trading-ws-host>` and redeploy Pages.
+  - [ ] Verify Data Gateway DNS: `dig dequandata.dequan.xyz` returns Cloudflare proxy IPs.
+  - [ ] Test Data Gateway: `curl -I https://dequandata.dequan.xyz` returns "426 Upgrade Required" (normal for WS).
 - [ ] If running Trading WS on a server (Phase 1), confirm reverse proxy + backend health:
   - [ ] Public health: `https://<trading-ws-host>/healthz`.
   - [ ] Backend bind is localhost only (`TRADING_API_HOST=127.0.0.1`), reachable via nginx.
@@ -54,9 +57,9 @@ This is the always-on checklist we use to prevent losing track of MVP vs later w
 ### UI/UX
 - [ ] Legibility palette + hierarchy maintained.
 - [ ] Critical signals remain attention-grabbing but not blinding.
-- [ ] Tiered UX: Free shows Live Feed max 10 tokens + Watching max 3; attempts to exceed show upgrade prompt for real live 1s candle chart.
-- [ ] Update subscription/tier page descriptions to mention: Free limits + "real live 1s candle chart" as a paid feature.
-- [ ] Implement real live 1-second candle chart in Watching + Holdings popout chart (replace current ~5s sparkline proxy).
+- [ ] Tiered UX: Free shows Live Feed max 10 tokens + Watching max 3; upgrade prompts focus on higher limits + risk/edge signals (not candles).
+- [ ] Update subscription/tier page descriptions to mention: Free limits + risk/edge signals as paid.
+- [x] Implement real live 1-second candle chart in Watching + Holdings popout chart (replace current ~5s sparkline proxy).
 - [ ] Popout chart: add direct Snipe button (and later Apex one-tap automation).
 
 ---

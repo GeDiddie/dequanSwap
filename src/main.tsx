@@ -27,7 +27,7 @@ export function Root() {
 
   return (
     <ConnectionProvider endpoint={endpoint} config={{ wsEndpoint }}>
-      <WalletProvider wallets={wallets}>
+      <WalletProvider wallets={wallets} autoConnect>
         <WalletModalProvider>
           <App />
         </WalletModalProvider>

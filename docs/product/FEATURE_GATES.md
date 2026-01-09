@@ -15,6 +15,8 @@ This document defines what is **enabled**, **disabled**, or **limited** by tier.
 | Watchlist + Growth % | ✅ (limited) | ✅ | ✅ |
 | Manual buy/sell buttons | ✅ | ✅ | ✅ |
 | Holdings metadata (buy time + buy MC) | ✅ | ✅ | ✅ |
+| Live 1s candle chart (SolanaTracker, client-built) | ✅ (limited) | ✅ | ✅ |
+| Risk/edge signals (holders/top10/dev/sniper/fees/curve/etc) | ❌ | ✅ | ✅ |
 | Holdings real-time chart | ✅ (limited) | ✅ | ✅ |
 | Sold history (trade journal) | ✅ | ✅ | ✅ |
 | Alerts on growth thresholds | ❌ (later) | ✅ | ✅ |

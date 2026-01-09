@@ -1,0 +1,7 @@
+# Wrangler config for local Pages dev + deploy.
+# Pinning compatibility_date makes Workers runtime behavior stable over time.
+name = "dequanswap"
+compatibility_date = "2026-01-06"
+
+# Wrangler Pages deploy: directory of static assets to upload.
+pages_build_output_dir = "dist"

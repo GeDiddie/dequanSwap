@@ -13,10 +13,18 @@ export const RadarPulse: React.FC<RadarPulseProps> = ({ isNewTokenFound, isCriti
   useEffect(() => {
     if (isNewTokenFound) {
       const id = Date.now()
-      setPulses((prev) => [...prev, id])
-      setTimeout(() => {
+      const addTimer = window.setTimeout(() => {
+        setPulses((prev) => [...prev, id])
+      }, 0)
+
+      const removeTimer = window.setTimeout(() => {
         setPulses((prev) => prev.filter((p) => p !== id))
       }, 2000) // Pulse duration
+
+      return () => {
+        window.clearTimeout(addTimer)
+        window.clearTimeout(removeTimer)
+      }
     }
   }, [isNewTokenFound])
 

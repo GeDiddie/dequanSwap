@@ -24,6 +24,7 @@ interface TokenRowProps {
   onWatch: (mint: string) => void
   onSnipe: (mint: string) => void
   disabled: boolean
+  nowMs: number
 }
 
 const shortPk = (pk: string) => `${pk.slice(0, 4)}…${pk.slice(-4)}`
@@ -39,7 +40,7 @@ const formatAge = (ms: number) => {
   return `${hr}h ${remMin}m`
 }
 
-export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSnipe, disabled }) => {
+export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSnipe, disabled, nowMs }) => {
   const hasGrowth = typeof token.mcGrowthPct === 'number' && Number.isFinite(token.mcGrowthPct)
   const growth = hasGrowth ? (token.mcGrowthPct as number) : 0
   const prevGrowthRef = useRef(growth)
@@ -53,27 +54,27 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
   const isCool = growth < 10
 
   const accent = isHot
-    ? 'rgba(248,81,73,0.95)'
+    ? 'rgba(57,211,83,0.95)'
     : isWarm
       ? 'rgba(234,179,8,0.95)'
       : isCool
-        ? 'rgba(0,212,255,0.95)'
+        ? 'rgba(234,179,8,0.95)'
         : 'rgba(57,211,83,0.95)'
 
   const heatAccent = isHot
-    ? 'rgba(248,81,73,0.22)'
+    ? 'rgba(57,211,83,0.22)'
     : isWarm
       ? 'rgba(234,179,8,0.18)'
       : isCool
-        ? 'rgba(0,212,255,0.16)'
+        ? 'rgba(234,179,8,0.16)'
         : 'rgba(57,211,83,0.18)'
 
-  const ageMs = token.startedAt ? Date.now() - token.startedAt : 0
+  const ageMs = token.startedAt ? nowMs - token.startedAt : 0
   const isDead = ageMs > 5 * 60 * 1000
   const isStale = !isDead && ageMs > 60 * 1000
 
   const isRugged = isTokenRugged(token)
-  const badgeLabel = isRugged ? 'RUGGED' : isHot ? 'HOT' : isWarm ? 'WARM' : isCool ? 'COOL' : 'TRACK'
+  const badgeLabel = isRugged ? 'COOKED' : isHot ? 'PUMPING' : isWarm ? 'MID' : isCool ? 'MID' : 'TRACK'
   const badgeClass = isRugged
     ? 'tokenRowBadgeRugged'
     : isHot
@@ -195,7 +196,7 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
       {/* IDENTITY */}
       <div className="tokenRowIdentity">
         <div className="tokenRowSymbol">{token.symbol || token.name || shortPk(token.mint)}</div>
-        <div className="tokenRowMeta">{token.startedAt ? `${formatAge(Date.now() - token.startedAt)} ago` : '—'} · {shortPk(token.mint)}</div>
+        <div className="tokenRowMeta">{token.startedAt ? `${formatAge(Math.max(0, nowMs - token.startedAt))} ago` : '—'} · {shortPk(token.mint)}</div>
       </div>
 
       {/* MC */}
@@ -214,7 +215,7 @@ export const TokenRow: React.FC<TokenRowProps> = ({ token, onLoad, onWatch, onSn
           </div>
           <span className={`tokenRowBadge ${badgeClass}`}>{badgeLabel}</span>
         </div>
-        <div className="tokenRowSub">{token.startedAt ? `Age ${formatAge(Date.now() - token.startedAt)}` : 'Age —'}</div>
+        <div className="tokenRowSub">{token.startedAt ? `Age ${formatAge(Math.max(0, nowMs - token.startedAt))}` : 'Age —'}</div>
       </div>
 
       {/* ACTIONS */}

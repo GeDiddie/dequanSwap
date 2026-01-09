@@ -7,7 +7,13 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "compat:bump": "node scripts/bumpWranglerCompatDate.mjs",
+    "pages:dev": "wrangler pages dev dist --port 8788",
+    "pages:dev:auto": "npm run compat:bump && npm run pages:dev",
+    "pages:deploy": "npm run build && wrangler pages deploy dist --project-name=dequanswap",
+    "pages:deploy:auto": "npm run compat:bump && npm run pages:deploy",
+    "deploy": "npm run pages:deploy"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.14",
@@ -18,6 +24,7 @@
     "@solana/web3.js": "^1.98.4",
     "bs58": "^6.0.0",
     "framer-motion": "^12.23.26",
+    "lightweight-charts": "^5.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

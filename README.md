@@ -13,6 +13,7 @@ A tiered, non-custodial swap/snipe interface with:
 - **Live trading**: Phantom signature per trade
 - **Fast Mode** (Sniper/Apex): Experimental no-popup execution via WSOL delegation + session key
 - **Tier gating**: Scout/Sniper/Apex product tiers with progressive feature unlocks
+- **Live 1-second candles**: TradingView-like candlestick chart built client-side from SolanaTracker WebSocket streams
 
 ---
 
@@ -26,14 +27,19 @@ A tiered, non-custodial swap/snipe interface with:
 ### Backend (dequanW)
 - **Location**: `~/bot/jul2025/dequanW/`
 - **Trading API**: WebSocket server at `tradingAPI/server.js`
-  - Endpoints: `quote`, `build_swap_tx`
+  - Endpoints: `quote`, `build_swap_tx`, `create_order`, `submit_signed_tx`
   - Integrates Jupiter v6 aggregator
+  - Deployment: `wss://dequantrade-ws.dequan.xyz` (port 8900 via Cloudflare Tunnel)
+- **Data Gateway**: Real-time metrics aggregation at `dequanW-data-gateway/`
+  - Aggregates SolanaTracker datastream (13 rooms per token)
+  - Provides: TPS, liquidity, holders, volume, dev/sniper percentages
+  - Deployment: `wss://dequandata.dequan.xyz` (port 8913 via Cloudflare Tunnel)
 - **Strategy**: `oneMinuteStrategy.js` publishes new token signals via WS feed
-- **Deployment**:
-  - API-lite (feed/watching): `https://dequanw-api.dequan.xyz`
-  - Trading API (WebSocket): `wss://dequantrade-ws.dequan.xyz`
+- **Dashboard**: `https://dequanw-api.dequan.xyz` (API-lite feed/watching)
 
-For backend integration details, see [docs/trading-api/TRADING_API_INTEGRATION.md](docs/trading-api/TRADING_API_INTEGRATION.md).
+For backend integration details, see:
+- [Trading API Integration](docs/trading-api/TRADING_API_INTEGRATION.md)
+- [Data Gateway Deployment](docs/DATA_GATEWAY_DEPLOYMENT.md)
 
 ---
 
@@ -63,17 +69,18 @@ Artifacts in `dist/` are ready to deploy to Cloudflare Pages.
 
 ## Configuration
 
-Copy `.env.example` → `.env`:
+Copy `.env.example` → `.env` (for local development):
 
 ```bash
-# Required
+# Required - Backend Services
+VITE_DEQUANW_WS_URL=ws://localhost:8900           # Trading API (local)
+VITE_DATA_GATEWAY_URL=ws://localhost:8913         # Data Gateway (local)
 VITE_SOLANA_RPC_URL=https://auth.dequan.xyz/solana-rpc
-VITE_DEQUANW_WS_URL=wss://dequantrade-ws.dequan.xyz
 
-# Account (paid tier upgrades)
+# Account Management
 VITE_CONTROL_PLANE_URL=https://auth.dequan.xyz
 
-# Auth
+# Auth (Dev Only)
 # - For public hosting: protect the WS hostname with Cloudflare Access (edge auth) and use wallet-signature auth (wallet binding)
 # - For local/dev: API key / token are supported but not safe for public sites
 VITE_DEQUANW_API_KEY=your-api-key          # Dev only
@@ -89,6 +96,69 @@ RPC note:
 - Any `VITE_*` value is bundled into the frontend and is effectively public.
 - Do not embed paid RPC API keys (Helius/QuickNode/etc) in production builds.
 - If you need a paid RPC, proxy it server-side (Worker/Node) so the key stays secret.
+
+---
+
+## Popout Candle Charts (Real-Time 1s OHLC)
+
+The popout chart displays **1-second OHLC candlesticks** with a modular data provider architecture.
+
+### Architecture
+
+```
+[Data Provider]     →  [dequanW Backend]      →  [dequanSwap Frontend]
+(SolanaTracker)        (Trading API WS)          (Browser)
+```
+
+- **Backend** subscribes to data provider (SolanaTracker, Jupiter, etc.)
+- **Frontend** subscribes to backend via Trading WS (`subscribe_price` message)
+- **Backend** broadcasts high-frequency `price_tick` messages to clients
+- **Frontend** builds 1s OHLC candles from price ticks client-side
+
+**Benefits:**
+- ✅ Security: data provider keys stay on backend
+- ✅ Modularity: swap providers backend-side without frontend changes
+- ✅ Cloud-ready: supports deployment anywhere (local PC → VPS → cloud)
+
+### Current Status
+
+**Frontend:** ✅ Ready for price feed subscription  
+**Backend:** ⏳ Needs price feed implementation (see `docs/backend-price-feed-implementation.md`)  
+**Fallback:** Quote polling (1 tick/sec) until backend price feed is ready
+
+### Tier behavior
+
+- **Scout (Free)**: 1s live candles ✅
+- **Sniper/Apex**: 1s live candles ✅ + additional **risk/edge signals** ✅
+  - Signals include: holders/top10/dev/sniper/insider/fees/curve + lifecycle/pool stats
+
+### Signal Delivery (SolanaTracker Datastream via Pages Proxy)
+
+Risk/edge signals (paid tiers only) use SolanaTracker datastream.
+
+In production we do **not** ship the SolanaTracker datastream key to the browser.
+Instead, the browser connects to a Pages Function WS proxy at `/ws/solanatracker`.
+
+The proxy requires a short-lived session token (query param `st`) minted by `/api/solanatracker/session`.
+Both endpoints run as Cloudflare Pages Functions.
+
+### Required Cloudflare secrets
+
+Set these as **Secrets** in your Cloudflare Pages project:
+
+- `SOLANATRACKER_DATASTREAM_KEY` — SolanaTracker datastream key (upstream WS key)
+- `SOLANATRACKER_GATE_SECRET` — random secret used to sign/verify short-lived session tokens
+  - Generate: `openssl rand -hex 32`
+
+Dashboard steps (Cloudflare): **Workers & Pages** → select your Pages project → **Settings** → **Variables and Secrets** → **Add** → enter name/value → **Encrypt** → **Save** → redeploy.
+
+### Local development
+
+- `npm run dev` (Vite) does **not** run Pages Functions.
+  - To develop candles in Vite dev, set `VITE_SOLANATRACKER_DATASTREAM_KEY` (dev-only) and it will connect directly to SolanaTracker.
+- To test the production-like setup locally (Functions + proxy), use:
+  - `npm run pages:dev`
+  - Put secrets in a `.dev.vars` file next to `wrangler.toml` (do not commit it).
 
 ### Cloudflare Access (recommended)
 

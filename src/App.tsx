@@ -1,5 +1,5 @@
 import './App.css'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useConnection, useWallet } from '@solana/wallet-adapter-react'
 import { BaseWalletMultiButton } from '@solana/wallet-adapter-react-ui'
 import { Keypair, PublicKey, Transaction, type Commitment, type Connection } from '@solana/web3.js'
@@ -9,7 +9,11 @@ import { TokenRow } from './components/TokenRow'
 import { RadarPulse } from './components/RadarPulse'
 import { HelpDot } from './components/HelpDot'
 import { TierSelectionScreen } from './components/TierSelectionScreen'
+import type { CandlesChartMarker } from './components/CandlesChart'
 import { TradingWs, TradingWsError, type TradingWsStats } from './lib/tradingWs'
+import { DataGatewayWs } from './lib/dataGatewayWs'
+import type { TokenMetricsMessage } from './lib/dataGatewayWs'
+import { Candles1sBuilder, type Candle1s, type CandleTick } from './lib/candles1s'
 import {
   getAccountMe,
   linkWalletToEmail,
@@ -51,6 +55,8 @@ import {
 
 import splashVideoUrl from './media/sol sniper.mp4'
 
+const CandlesChartLazy = lazy(() => import('./components/CandlesChart').then((m) => ({ default: m.CandlesChart })))
+
 type QuoteResult = {
   type: 'quote_result'
   success: boolean
@@ -76,6 +82,57 @@ type BuildSwapTxResult = {
     recentBlockhash?: string
     lastValidBlockHeight?: number
   }
+}
+
+type CreateOrderResult = {
+  type: 'create_order_result'
+  success: boolean
+  data?: {
+    orderId?: string
+  }
+}
+
+type SubmitSignedTxResult = {
+  type: 'submit_signed_tx_result'
+  success: boolean
+  data?: {
+    signature?: string
+  }
+}
+
+type GetPositionsResult = {
+  type: 'get_positions_result'
+  success: boolean
+  data?: {
+    holdings?: Array<{
+      mint?: string
+      isOpen?: boolean
+      openedAt?: number
+      updatedAt?: number
+    }>
+  }
+}
+
+type GetHistoryResult = {
+  type: 'get_history_result'
+  success: boolean
+  data?: {
+    history?: Array<{
+      mint?: string
+      soldAt?: number
+      sellSignature?: string
+    }>
+  }
+}
+
+type OrderUpdateMsg = {
+  type: 'order_update'
+  data?: Record<string, unknown>
+}
+
+type PositionUpdateMsg = {
+  type: 'position_update'
+  data?: Record<string, unknown>
 }
 
 type TradingApiTierCounts = {
@@ -397,6 +454,7 @@ type HoldingToken = {
   error?: string
   buyMc?: number
   currentMc?: number
+  mcUpdatedAt?: number
 
   // Quote-based price proxy (scaled bigint stored as string to avoid overflow).
   // entry* fields are the holding's baseline at buy time.
@@ -410,11 +468,45 @@ type HoldingToken = {
 type SoldToken = {
   mint: string
   soldAt: number
+  name?: string
+  symbol?: string
   outcome?: 'SOLD' | 'RUGGED'
   pct?: number
   signature?: string
   buyMc?: number
   sellMc?: number
+}
+
+function randomIdempotencyKey(): string {
+  const c = (globalThis as unknown as { crypto?: Crypto }).crypto
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`
+}
+
+function computeHoldingMcProxy(h: HoldingToken): number | undefined {
+  const baseMc =
+    typeof h.buyMc === 'number' && Number.isFinite(h.buyMc) && h.buyMc > 0
+      ? h.buyMc
+      : typeof h.currentMc === 'number' && Number.isFinite(h.currentMc) && h.currentMc > 0
+        ? h.currentMc
+        : undefined
+  if (typeof baseMc !== 'number') return undefined
+
+  const entryScaled = h.entryPriceProxyScaled ? bigintFromString(h.entryPriceProxyScaled) : undefined
+  const lastScaled = h.lastPriceProxyScaled ? bigintFromString(h.lastPriceProxyScaled) : undefined
+  if (typeof entryScaled !== 'bigint' || typeof lastScaled !== 'bigint') return undefined
+  if (entryScaled <= 0n || lastScaled <= 0n) return undefined
+
+  const ratioTimes1e6 = (lastScaled * 1_000_000n) / entryScaled
+  if (ratioTimes1e6 <= 0n) return undefined
+  if (bigintAbs(ratioTimes1e6) > BigInt(Number.MAX_SAFE_INTEGER)) return undefined
+
+  const ratio = Number(ratioTimes1e6) / 1_000_000
+  if (!Number.isFinite(ratio) || ratio <= 0) return undefined
+
+  const mc = baseMc * ratio
+  if (!Number.isFinite(mc) || mc <= 0) return undefined
+  return mc
 }
 
 function parseWatchedTokens(raw: string | null): WatchedToken[] {
@@ -469,6 +561,7 @@ function parseHoldings(raw: string | null): HoldingToken[] {
         if (typeof r.error === 'string') h.error = r.error
         if (typeof r.buyMc === 'number') h.buyMc = r.buyMc
         if (typeof r.currentMc === 'number') h.currentMc = r.currentMc
+        if (typeof r.mcUpdatedAt === 'number') h.mcUpdatedAt = r.mcUpdatedAt
 
         if (typeof r.entryPriceProxyScaled === 'string') h.entryPriceProxyScaled = r.entryPriceProxyScaled
         if (typeof r.lastPriceProxyScaled === 'string') h.lastPriceProxyScaled = r.lastPriceProxyScaled
@@ -528,6 +621,8 @@ function parseSoldTokens(raw: string | null): SoldToken[] {
         const soldAt = typeof r.soldAt === 'number' ? r.soldAt : Date.now()
         if (!mint) return null
         const s: SoldToken = { mint, soldAt }
+        if (typeof r.name === 'string') s.name = r.name
+        if (typeof r.symbol === 'string') s.symbol = r.symbol
         if (r.outcome === 'SOLD' || r.outcome === 'RUGGED') s.outcome = r.outcome
         if (typeof r.pct === 'number') s.pct = r.pct
         if (typeof r.signature === 'string') s.signature = r.signature
@@ -605,7 +700,7 @@ type DequanwWatchingResponse = {
 
 function App() {
   const { connection } = useConnection()
-  const { publicKey, connected, connecting, signTransaction, signMessage } = useWallet()
+  const { publicKey, connected, connecting, signTransaction, signMessage, wallet, connect } = useWallet()
 
   const [walletActionHint, setWalletActionHint] = useState<'' | 'connect' | 'signature'>('')
   const walletConnectingRef = useRef(false)
@@ -618,6 +713,24 @@ function App() {
   useEffect(() => {
     walletConnectedRef.current = connected
   }, [connected])
+
+  // Eagerly connect when wallet is selected
+  useEffect(() => {
+    if (!wallet || connected || connecting) return
+    
+    // Attempt to connect immediately when wallet is selected
+    connect().catch((error) => {
+      console.warn('[Wallet] Auto-connect failed:', error)
+    })
+  }, [wallet, connected, connecting, connect])
+
+  // Reset auth state when wallet disconnects
+  useEffect(() => {
+    if (!connected || !publicKey) {
+      setWsAuthed(false)
+      autoAuthedWalletRef.current = ''
+    }
+  }, [connected, publicKey])
 
   const defaultWsUrl = import.meta.env.VITE_DEQUANW_WS_URL || 'ws://localhost:8900'
   const defaultApiKey = import.meta.env.VITE_DEQUANW_API_KEY || ''
@@ -877,14 +990,159 @@ function App() {
   }, [apiKey, authToken, connected, publicKey])
 
   const wsRef = useRef<TradingWs | null>(null)
+  const wsEventsBoundToRef = useRef<TradingWs | null>(null)
+  const wsEventsUnsubRef = useRef<(() => void) | null>(null)
+  const lastPositionsSyncAtRef = useRef(0)
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connected'>('disconnected')
   const [wsAuthed, setWsAuthed] = useState(false)
+
+  const syncPositionsFromBackend = useCallback(
+    async (reason?: string) => {
+      if (!publicKey) return
+
+      const ws = wsRef.current
+      if (!ws || !ws.isOpen || !ws.isAuthed) return
+
+      const now = Date.now()
+      if (now - lastPositionsSyncAtRef.current < 1500) return
+      lastPositionsSyncAtRef.current = now
+
+      let positions: GetPositionsResult | null = null
+      let history: GetHistoryResult | null = null
+
+      try {
+        positions = await ws.request<GetPositionsResult>(
+          { type: 'get_positions' },
+          (m): m is GetPositionsResult => m.type === 'get_positions_result',
+          12_000,
+        )
+      } catch (e) {
+        pushDebugEvent({
+          area: 'ws',
+          level: 'warn',
+          message: `get_positions failed${reason ? ` (${reason})` : ''}`,
+          detail: e instanceof Error ? e.message : String(e || ''),
+        })
+      }
+
+      try {
+        history = await ws.request<GetHistoryResult>(
+          { type: 'get_history' },
+          (m): m is GetHistoryResult => m.type === 'get_history_result',
+          12_000,
+        )
+      } catch (e) {
+        pushDebugEvent({
+          area: 'ws',
+          level: 'warn',
+          message: `get_history failed${reason ? ` (${reason})` : ''}`,
+          detail: e instanceof Error ? e.message : String(e || ''),
+        })
+      }
+
+      if (positions?.success && Array.isArray(positions.data?.holdings)) {
+        const open = positions.data.holdings.filter((h) => Boolean(h?.isOpen) && typeof h?.mint === 'string')
+
+        setHoldings((prev) => {
+          const prevByMint = new Map(prev.map((h) => [h.mint, h]))
+          const next: HoldingToken[] = []
+          const seen = new Set<string>()
+
+          for (const h of open) {
+            const mint = String(h.mint)
+            const existing = prevByMint.get(mint)
+            const openedAt = typeof h.openedAt === 'number' && Number.isFinite(h.openedAt) ? h.openedAt : undefined
+            const updatedAt = typeof h.updatedAt === 'number' && Number.isFinite(h.updatedAt) ? h.updatedAt : undefined
+            const boughtAt = existing?.boughtAt ?? openedAt ?? updatedAt ?? Date.now()
+            next.push({
+              ...(existing || { mint, boughtAt }),
+              mint,
+              boughtAt,
+            })
+            seen.add(mint)
+          }
+
+          // Keep any local-only holdings (e.g. just bought but backend not updated yet).
+          for (const h of prev) {
+            if (!seen.has(h.mint)) next.push(h)
+          }
+
+          return next
+        })
+      }
+
+      if (history?.success && Array.isArray(history.data?.history)) {
+        const backendSold: SoldToken[] = history.data.history
+          .filter((x) => x && typeof x.mint === 'string')
+          .map((x) => ({
+            mint: String(x.mint),
+            soldAt: Number.isFinite(Number(x.soldAt)) ? Number(x.soldAt) : Date.now(),
+            outcome: 'SOLD' as const,
+            pct: 100,
+            ...(x.sellSignature ? { signature: String(x.sellSignature) } : {}),
+          }))
+
+        setSoldTokens((prev) => {
+          const seenSig = new Set(backendSold.map((s) => s.signature).filter(Boolean) as string[])
+          const seenMintTime = new Set(backendSold.map((s) => `${s.mint}:${s.soldAt}`))
+
+          const extras = prev.filter((s) => {
+            if (s.outcome === 'RUGGED') return true
+            if (s.signature && !seenSig.has(s.signature)) return true
+            if (!seenMintTime.has(`${s.mint}:${s.soldAt}`)) return true
+            return false
+          })
+
+          return [...backendSold, ...extras].sort((a, b) => b.soldAt - a.soldAt)
+        })
+      }
+    },
+    [publicKey, pushDebugEvent],
+  )
 
   const [tokenMint, setTokenMint] = useState('')
   const [amountSol, setAmountSol] = useState('0.01')
   const [slippageBps, setSlippageBps] = useState(4000)
 
   const [snipeCardSide, setSnipeCardSide] = useState<'snipe' | 'sell'>('snipe')
+
+  const flipFrontRef = useRef<HTMLDivElement | null>(null)
+  const flipBackRef = useRef<HTMLDivElement | null>(null)
+  const [flipCardHeight, setFlipCardHeight] = useState<number | undefined>(undefined)
+
+  const measureFlipHeight = useCallback(() => {
+    const el = snipeCardSide === 'sell' ? flipBackRef.current : flipFrontRef.current
+    if (!el) return
+    const h = Math.max(0, Math.ceil(el.getBoundingClientRect().height))
+    if (!h) return
+    setFlipCardHeight(h)
+  }, [snipeCardSide])
+
+  useLayoutEffect(() => {
+    measureFlipHeight()
+    const id = window.requestAnimationFrame(() => measureFlipHeight())
+    return () => window.cancelAnimationFrame(id)
+  }, [measureFlipHeight])
+
+  useEffect(() => {
+    const ResizeObs = (window as unknown as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
+    if (!ResizeObs) return
+
+    const ro = new ResizeObs(() => measureFlipHeight())
+    if (flipFrontRef.current) ro.observe(flipFrontRef.current)
+    if (flipBackRef.current) ro.observe(flipBackRef.current)
+
+    window.addEventListener('resize', measureFlipHeight)
+    return () => {
+      window.removeEventListener('resize', measureFlipHeight)
+      ro.disconnect()
+    }
+  }, [measureFlipHeight])
+
+  // Popup overlay state
+  const [snipePopupVisible, setSnipePopupVisible] = useState(false)
+  const [portfolioOpen, setPortfolioOpen] = useState(false)
+
   const [sellMintInput, setSellMintInput] = useState('')
   const [sellPct, setSellPct] = useState<25 | 50 | 100>(100)
 
@@ -972,11 +1230,702 @@ function App() {
     saveSetting('dequanswap.useQuoteMcProxyWhenStale', useQuoteMcProxyWhenStale ? '1' : '0')
   }, [useQuoteMcProxyWhenStale])
 
+  const getHoldingDisplayMc = useCallback(
+    (h: HoldingToken): { mc?: number; isProxy: boolean } => {
+      const hasFeedMc = typeof h.currentMc === 'number' && Number.isFinite(h.currentMc)
+      const feedFresh = typeof h.mcUpdatedAt === 'number' ? uiNow - h.mcUpdatedAt < 20_000 : false
+      const feedMc = hasFeedMc ? h.currentMc : undefined
+
+      if (typeof feedMc === 'number' && feedFresh) return { mc: feedMc, isProxy: false }
+
+      if (useQuoteMcProxyWhenStale) {
+        const proxyMc = computeHoldingMcProxy(h)
+        if (typeof proxyMc === 'number') return { mc: proxyMc, isProxy: true }
+      }
+
+      return { mc: feedMc, isProxy: false }
+    },
+    [uiNow, useQuoteMcProxyWhenStale],
+  )
+
   const holdingsMcHistoryRef = useRef<Record<string, SeriesPoint[]>>({})
   const [holdingDrawerMint, setHoldingDrawerMint] = useState<string>('')
 
   const watchingMcHistoryRef = useRef<Record<string, SeriesPoint[]>>({})
   const [watchDrawerMint, setWatchDrawerMint] = useState<string>('')
+
+  // Persistent candle history storage per mint
+  const candleHistoryRef = useRef<Record<string, Candle1s[]>>({})
+
+  const activePopoutMint = holdingDrawerMint || watchDrawerMint
+
+  // IMPORTANT: In production we do not ship SolanaTracker keys to the browser.
+  // The frontend connects to a Pages Function that proxies the WS using a secret key.
+  // In local Vite dev (npm run dev), Pages Functions are not available; you can provide a direct
+  // key via VITE_SOLANATRACKER_DATASTREAM_KEY for development only.
+  const solanaTrackerDirectKey = String(import.meta.env.VITE_SOLANATRACKER_DATASTREAM_KEY || '').trim()
+  const [solanaTrackerSession, setSolanaTrackerSession] = useState<
+    | {
+        token: string
+        expiresAtMs: number
+      }
+    | null
+  >(null)
+
+  const solanaTrackerWsBaseUrl = useMemo(() => {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const proxy = `${proto}://${window.location.host}/ws/solanatracker`
+
+    if (import.meta.env.DEV) {
+      if (!solanaTrackerDirectKey) return ''
+      return `wss://datastream.solanatracker.io/${encodeURIComponent(solanaTrackerDirectKey)}`
+    }
+
+    return proxy
+  }, [solanaTrackerDirectKey])
+
+  const solanaTrackerWsUrl = useMemo(() => {
+    if (!solanaTrackerWsBaseUrl) return ''
+    if (import.meta.env.DEV) return solanaTrackerWsBaseUrl
+
+    const token = String(solanaTrackerSession?.token || '').trim()
+    if (!token) return ''
+    return `${solanaTrackerWsBaseUrl}?st=${encodeURIComponent(token)}`
+  }, [solanaTrackerSession?.token, solanaTrackerWsBaseUrl])
+
+  useEffect(() => {
+    if (import.meta.env.DEV) return
+    if (!activePopoutMint) return
+
+    const now = Date.now()
+    const exp = solanaTrackerSession?.expiresAtMs ?? 0
+    const needs = !solanaTrackerSession || !solanaTrackerSession.token || exp - now < 30_000
+    if (!needs) return
+
+    let cancelled = false
+    const fetchSession = async () => {
+      try {
+        const r = await fetch('/api/solanatracker/session', {
+          method: 'GET',
+          cache: 'no-store',
+          credentials: 'omit',
+        })
+        if (!r.ok) throw new Error(`session_http_${r.status}`)
+        const j = (await r.json()) as { token?: string; expiresAtMs?: number }
+        const token = typeof j.token === 'string' ? j.token : ''
+        const expiresAtMs = typeof j.expiresAtMs === 'number' ? j.expiresAtMs : 0
+        if (!token || !expiresAtMs) throw new Error('session_invalid')
+        if (cancelled) return
+        setSolanaTrackerSession({ token, expiresAtMs })
+      } catch (e) {
+        if (cancelled) return
+        setSolanaTrackerSession(null)
+      }
+    }
+
+    void fetchSession()
+    return () => {
+      cancelled = true
+    }
+  }, [activePopoutMint, solanaTrackerSession, tier])
+
+  const dataGatewayRef = useRef<DataGatewayWs | null>(null)
+  const popoutCandleBuilderRef = useRef<Candles1sBuilder | null>(null)
+  const popoutRafRef = useRef<number | null>(null)
+  const popoutUiUpdateAtRef = useRef<number>(0)
+  const popoutMarkersRef = useRef<CandlesChartMarker[]>([])
+  const popoutMarkersRafRef = useRef<number | null>(null)
+  const [popoutCandles, setPopoutCandles] = useState<Candle1s[]>([])
+  const [popoutMarkers, setPopoutMarkers] = useState<CandlesChartMarker[]>([])
+  const [popoutLastTickAt, setPopoutLastTickAt] = useState<number>(0)
+  const [popoutCandleError, setPopoutCandleError] = useState<string>('')
+  const [popoutWsDebugOpen, setPopoutWsDebugOpen] = useState(false)
+  const popoutWsDebugEnabledRef = useRef(false)
+  const popoutWsDebugLogRef = useRef<Array<{ at: number; room: string; payload: unknown }>>([])
+  const [popoutWsDebugText, setPopoutWsDebugText] = useState('')
+  const popoutWsDebugFlushIdRef = useRef<number | null>(null)
+  const popoutWsRoomWinnersRef = useRef<{ tokenPrimary?: string; tokenStats?: string; poolStats?: string }>({})
+  const [popoutWsRoomWinners, setPopoutWsRoomWinners] = useState<{ tokenPrimary?: string; tokenStats?: string; poolStats?: string }>({})
+  const [popoutSolanaTrackerWarning, setPopoutSolanaTrackerWarning] = useState<string>('')
+  const [popoutSignals, setPopoutSignals] = useState<{
+    holders?: number
+    top10Pct?: number
+    devPct?: number
+    sniperPct?: number
+    insiderPct?: number
+    feesUsd?: number
+    curvePct?: number
+    graduating?: boolean
+    graduated?: boolean
+    primaryPoolId?: string
+    vol5mUsd?: number
+    tx5m?: number
+    liquidityUsd?: number
+  }>({})
+  const popoutPoolIdRef = useRef<string>('')
+
+  // Data Gateway URL (localhost for dev, production gateway for deployed)
+  const dataGatewayUrl = useMemo(() => {
+    if (import.meta.env.DEV) return 'ws://localhost:8913'
+    return 'wss://dequandata.dequan.xyz'
+  }, [])
+
+  useEffect(() => {
+    const cur = dataGatewayRef.current
+    if (!cur) return
+    if (cur.endpointUrl !== dataGatewayUrl) {
+      cur.destroy()
+      dataGatewayRef.current = null
+    }
+  }, [dataGatewayUrl])
+
+  useEffect(() => {
+    popoutWsDebugEnabledRef.current = popoutWsDebugOpen
+  }, [popoutWsDebugOpen])
+
+  const recordPopoutWsDebug = useCallback((room: string, payload: unknown) => {
+    if (!popoutWsDebugEnabledRef.current) return
+    const log = popoutWsDebugLogRef.current
+    log.push({ at: Date.now(), room, payload })
+    if (log.length > 20) log.splice(0, log.length - 20)
+
+    if (popoutWsDebugFlushIdRef.current != null) return
+    popoutWsDebugFlushIdRef.current = window.setTimeout(() => {
+      popoutWsDebugFlushIdRef.current = null
+      try {
+        const winners = popoutWsRoomWinnersRef.current
+        const header = [
+          `tokenPrimary=${winners.tokenPrimary || '—'}`,
+          `tokenStats=${winners.tokenStats || '—'}`,
+          `poolStats=${winners.poolStats || '—'}`,
+        ].join('   ')
+
+        const lines = popoutWsDebugLogRef.current
+          .slice()
+          .reverse()
+          .map((e) => {
+            let body = ''
+            try {
+              body = JSON.stringify(e.payload)
+            } catch {
+              body = String(e.payload)
+            }
+            if (body.length > 1400) body = `${body.slice(0, 1400)}…`
+            return `${new Date(e.at).toLocaleTimeString()}  ${e.room}  ${body}`
+          })
+        setPopoutWsDebugText([header, '', ...lines].join('\n'))
+      } catch {
+        // ignore
+      }
+    }, 200)
+  }, [])
+
+  const schedulePopoutMarkersFlush = useCallback(() => {
+    if (popoutMarkersRafRef.current != null) return
+    popoutMarkersRafRef.current = window.requestAnimationFrame(() => {
+      popoutMarkersRafRef.current = null
+      setPopoutMarkers([...popoutMarkersRef.current])
+    })
+  }, [])
+
+  const pushPopoutMarker = useCallback(
+    (mint: string, marker: CandlesChartMarker) => {
+      if (!mint || !activePopoutMint) return
+      if (mint !== activePopoutMint) return
+
+      const cur = popoutMarkersRef.current
+      const last = cur.length ? cur[cur.length - 1] : null
+      if (last && last.time === marker.time && last.text === marker.text && last.shape === marker.shape) return
+
+      const next = [...cur, marker]
+      if (next.length > 160) next.splice(0, next.length - 160)
+      popoutMarkersRef.current = next
+      schedulePopoutMarkersFlush()
+    },
+    [activePopoutMint, schedulePopoutMarkersFlush],
+  )
+
+  useEffect(() => {
+    if (!activePopoutMint) {
+      setPopoutCandles([])
+      setPopoutMarkers([])
+      setPopoutLastTickAt(0)
+      setPopoutCandleError('')
+      setPopoutWsDebugText('')
+      setPopoutWsRoomWinners({})
+      popoutWsRoomWinnersRef.current = {}
+      popoutWsDebugLogRef.current = []
+      popoutCandleBuilderRef.current = null
+      popoutMarkersRef.current = []
+      setPopoutSolanaTrackerWarning('')
+      setPopoutSignals({})
+      return
+    }
+
+    // ============================================================================
+    // POPOUT CANDLE CHART DATA SOURCE
+    // ============================================================================
+    // Architecture: Backend-sourced real-time price ticks via Trading WS
+    //
+    // The dequanW Trading API implements price feed streaming:
+    //   - Frontend: ws.send({ type: 'subscribe_price', mint: '...' })
+    //   - Backend: subscribes to data provider (SolanaTracker/Jupiter/etc.)
+    //   - Backend: broadcasts { type: 'price_tick', mint, price, timestamp }
+    //   - Frontend: builds 1s OHLC candles from high-frequency price ticks
+    //
+    // Benefits:
+    //   ✅ Security: data provider keys stay on backend
+    //   ✅ Modularity: swap providers backend-side without frontend changes
+    //   ✅ Scalability: backend can cache/aggregate/rate-limit
+    //   ✅ Cloud-ready: no local dependencies
+    //
+    // Implementation: REAL-TIME PRICE FEED (subscribe_price)
+    //   - Using backend price feed streaming for 1s candles
+    //   - Fallback to quote polling if subscribe fails (backward compatibility)
+    // ============================================================================
+
+    let hadAnyTick = false
+    let cancelled = false
+    let inFlight = false
+    let intervalId: number | null = null
+
+    const builder = new Candles1sBuilder({ maxCandles: 1200, gapFill: true })
+    
+    // Load existing candle history for this mint if available
+    const existingCandles = candleHistoryRef.current[activePopoutMint]
+    if (existingCandles && existingCandles.length > 0) {
+      try {
+        // Seed the builder with existing candles to continue where we left off
+        existingCandles.forEach(candle => {
+          builder.pushTick({ tsMs: candle.time * 1000, price: candle.open })
+        })
+      } catch (err) {
+        console.warn('[CandleChart] Failed to load existing candles:', err)
+      }
+    }
+    
+    popoutCandleBuilderRef.current = builder
+    
+    // Initialize UI with existing candles if available
+    if (existingCandles && existingCandles.length > 0) {
+      setPopoutCandles([...existingCandles])
+    } else {
+      setPopoutCandles([])
+    }
+    
+    setPopoutMarkers([])
+    setPopoutLastTickAt(0)
+    setPopoutCandleError('')
+    setPopoutWsDebugText('')
+    setPopoutWsRoomWinners({})
+    popoutWsRoomWinnersRef.current = {}
+    popoutWsDebugLogRef.current = []
+    popoutMarkersRef.current = []
+
+    const scheduleFlush = () => {
+      if (popoutRafRef.current != null) return
+      popoutRafRef.current = window.requestAnimationFrame(() => {
+        popoutRafRef.current = null
+        const now = Date.now()
+        // Avoid rerendering the entire App at animation-rate.
+        // 10 fps is more than enough for a 1s candle chart.
+        if (now - popoutUiUpdateAtRef.current < 100) return
+        popoutUiUpdateAtRef.current = now
+        setPopoutCandles([...builder.getAll()])
+        setPopoutLastTickAt(now)
+      })
+    }
+
+    const pushTick = (tick: CandleTick) => {
+      const res = builder.pushTick(tick)
+      if (!res) return
+      hadAnyTick = true
+      scheduleFlush()
+    }
+
+    const toProxyPriceNumber = (proxyScaled: bigint): number | null => {
+      // Convert proxyScaled (lamports/baseUnit * 1e12) into a safe JS number.
+      // We keep ~6 decimals of precision to avoid overflow/Infinity.
+      try {
+        const proxyTimes1e6 = (proxyScaled * 1_000_000n) / PRICE_PROXY_SCALE
+        if (bigintAbs(proxyTimes1e6) > BigInt(Number.MAX_SAFE_INTEGER)) return null
+        const n = Number(proxyTimes1e6) / 1_000_000
+        return Number.isFinite(n) && n > 0 ? n : null
+      } catch {
+        return null
+      }
+    }
+
+    // ============================================================================
+    // TEMPORARY FALLBACK: Quote polling for price ticks
+    // ============================================================================
+    // This fallback activates only if subscribe_price/price_tick fails or is unavailable.
+    // ============================================================================
+
+    let priceFeedSubscribed = false
+    let priceTickListenerCleanup: (() => void) | null = null
+
+    const pollOnce = async () => {
+      if (cancelled) return
+      if (inFlight) return
+      if (Date.now() < userRateLimitUntilMs) return
+      inFlight = true
+      try {
+        const walletSigAvailable = Boolean(publicKey && signMessage)
+        const desiredWallet = walletSigAvailable ? publicKey!.toBase58() : undefined
+        const desiredApiKey = apiKey.trim() || undefined
+        const desiredAuthToken = authToken.trim() || undefined
+        const desiredAuthKey = [desiredApiKey || '', desiredAuthToken || '', desiredWallet || ''].join('|')
+
+        // Keep a single WS instance (shared with other features) when possible.
+        // If auth settings changed, drop/recreate so the server sees the right auth.
+        if (wsRef.current && wsRef.current.isOpen && wsRef.current.authKey !== desiredAuthKey) {
+          wsRef.current.close()
+          wsRef.current = null
+        }
+
+        if (!wsRef.current) {
+          wsRef.current = new TradingWs({
+            url: wsUrl,
+            wallet: desiredWallet,
+            signMessage: walletSigAvailable ? signMessage! : undefined,
+            apiKey: desiredApiKey,
+            authToken: desiredAuthToken,
+          })
+        }
+
+        // Match the app's existing behavior: no open unauth socket if nothing can auth.
+        if (!walletSigAvailable && !desiredApiKey && !desiredAuthToken) {
+          setPopoutCandleError('Connect wallet for live candle chart')
+          throw new Error('Signature needed in wallet')
+        }
+
+        if (!wsRef.current.isOpen) {
+          await wsRef.current.connect()
+        }
+
+        const ws = wsRef.current
+        if (!ws) throw new Error('Trading WS unavailable')
+
+        // ============================================================================
+        // PRIMARY: Price feed subscription (real-time streaming)
+        // ============================================================================
+        // Subscribe to price_tick messages for real-time 1s candle data.
+        // If subscription succeeds, skip quote polling (no longer needed).
+        // ============================================================================
+        if (!priceFeedSubscribed) {
+          try {
+            // Add message listener for price_tick
+            priceTickListenerCleanup = ws.onMessage((msg) => {
+              if (msg.type === 'price_tick' && msg.mint === activePopoutMint) {
+                const price = typeof msg.priceUsd === 'number' ? msg.priceUsd : (typeof msg.price === 'number' ? msg.price : 0)
+                const timestamp = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now()
+                if (price > 0) {
+                  pushTick({ tsMs: timestamp, price })
+                  recordPopoutWsDebug('__price_tick__', { mint: activePopoutMint, price, timestamp })
+                }
+              }
+            })
+
+            // Send subscribe_price message
+            ws.send({ type: 'subscribe_price', mint: activePopoutMint })
+            priceFeedSubscribed = true
+            console.log(`[CandleChart] Subscribed to price feed: ${activePopoutMint.slice(0, 8)}...`)
+
+            // Clear any fallback error since we're using the real price feed now
+            setPopoutCandleError('')
+            
+            // Skip quote polling - we're using the price feed
+            inFlight = false
+            return
+          } catch (subErr) {
+            console.warn('[CandleChart] Price feed subscription failed, falling back to quote polling:', subErr)
+            // Fall through to quote polling
+          }
+        } else {
+          // Already subscribed to price feed, skip quote polling
+          inFlight = false
+          return
+        }
+
+        // ============================================================================
+        // FALLBACK: Quote polling (only if price feed unavailable)
+        // ============================================================================
+        recordPopoutWsDebug('__quote__', { mint: activePopoutMint })
+
+        const userPubkey = publicKey?.toBase58() || READONLY_PUBKEY
+
+        // Keep the probe amount small + bounded; larger amounts can skew quotes on illiquid tokens.
+        const probeSol = clamp(Number(amountSol) || 0.01, 0.001, 0.1)
+        const amountInLamports = toLamports(probeSol)
+        if (amountInLamports <= 0) throw new Error('invalid_probe_amount')
+
+        const quote = await ws.request<QuoteResult>(
+          {
+            type: 'quote',
+            params: {
+              userPubkey,
+              inputMint: SOL_MINT,
+              outputMint: activePopoutMint,
+              amountIn: amountInLamports.toString(),
+              slippageBps: clamp(slippageBps, 0, 50_000),
+            },
+          },
+          (m): m is QuoteResult => m.type === 'quote_result',
+          8_000,
+        )
+
+        recordPopoutWsDebug('__quote_result__', quote)
+        if (!quote.success || !quote.data?.amountOut || !quote.data?.amountIn) throw new Error('quote_failed')
+
+        const amountOutBaseUnits = BigInt(quote.data.amountOut)
+        const amountIn = BigInt(quote.data.amountIn)
+        const proxyScaled = computePriceProxyScaled(amountIn, amountOutBaseUnits)
+        const price = toProxyPriceNumber(proxyScaled)
+        if (typeof price !== 'number') throw new Error('quote_price_unusable')
+
+        pushTick({ tsMs: Date.now(), price })
+      } catch (e) {
+        if (cancelled) return
+        if (isUserRateLimitedError(e)) bumpUserRateLimitBackoff()
+
+        // Only surface a loud error if we haven't gotten any data yet.
+        if (!hadAnyTick) {
+          // Check if it's a wallet connection error
+          const errorMsg = e instanceof Error ? e.message : String(e)
+          if (errorMsg.includes('Signature needed') || errorMsg.includes('wallet')) {
+            setPopoutCandleError('Connect wallet for live candle chart')
+          } else {
+            setPopoutCandleError(
+              `Live candles unavailable (fallback mode). Backend needs price feed implementation.`,
+            )
+          }
+        }
+      } finally {
+        inFlight = false
+      }
+    }
+
+    // Prime immediately, then maintain a steady 1s cadence.
+    void pollOnce()
+    intervalId = window.setInterval(() => void pollOnce(), 1000)
+
+    return () => {
+      cancelled = true
+      
+      // Save candle history before cleanup
+      if (builder && activePopoutMint) {
+        const currentCandles = builder.getAll()
+        if (currentCandles.length > 0) {
+          candleHistoryRef.current[activePopoutMint] = currentCandles
+        }
+      }
+      
+      // Unsubscribe from price feed if subscribed
+      if (priceFeedSubscribed && wsRef.current?.isOpen) {
+        try {
+          wsRef.current.send({ type: 'unsubscribe_price', mint: activePopoutMint })
+          console.log(`[CandleChart] Unsubscribed from price feed: ${activePopoutMint.slice(0, 8)}...`)
+        } catch (err) {
+          console.warn('[CandleChart] Failed to unsubscribe from price feed:', err)
+        }
+      }
+
+      // Remove price_tick listener
+      if (priceTickListenerCleanup) {
+        priceTickListenerCleanup()
+        priceTickListenerCleanup = null
+      }
+
+      if (intervalId != null) {
+        window.clearInterval(intervalId)
+        intervalId = null
+      }
+      if (popoutRafRef.current != null) {
+        window.cancelAnimationFrame(popoutRafRef.current)
+        popoutRafRef.current = null
+      }
+      if (popoutMarkersRafRef.current != null) {
+        window.cancelAnimationFrame(popoutMarkersRafRef.current)
+        popoutMarkersRafRef.current = null
+      }
+    }
+  }, [activePopoutMint, amountSol, apiKey, authToken, bumpUserRateLimitBackoff, isUserRateLimitedError, publicKey, pushPopoutMarker, recordPopoutWsDebug, signMessage, slippageBps, userRateLimitUntilMs, wsUrl])
+
+  useEffect(() => {
+    if (!activePopoutMint) {
+      setPopoutSignals({})
+      popoutPoolIdRef.current = ''
+      setPopoutSolanaTrackerWarning('')
+      return
+    }
+
+    if (!dataGatewayRef.current) {
+      dataGatewayRef.current = new DataGatewayWs({ url: dataGatewayUrl })
+    }
+    const gateway = dataGatewayRef.current
+    const mint = activePopoutMint
+
+    // Connect and subscribe
+    gateway.connect().catch((err) => {
+      console.error('[DataGateway] Connection failed:', err)
+      setPopoutSolanaTrackerWarning('Data Gateway connection failed')
+    })
+
+    gateway.subscribe(mint)
+
+    const unsubGlobal = gateway.onMessage((msg) => {
+      if (msg.type === 'error') {
+        recordPopoutWsDebug('__gateway__', msg)
+        setPopoutSolanaTrackerWarning(`Data Gateway error: ${msg.message}`)
+      }
+    })
+
+    // Track previous values for marker detection
+    let lastTop10: number | undefined
+    let lastDev: number | undefined
+    let lastSniper: number | undefined
+    let lastInsider: number | undefined
+    let lastCurve: number | undefined
+
+    const maybeMarkCross = (label: string, prev: number | undefined, next: number, threshold: number, color: string) => {
+      const crossed = (typeof prev !== 'number' || prev < threshold) && next >= threshold
+      if (!crossed) return
+      pushPopoutMarker(mint, {
+        time: Math.floor(Date.now() / 1000),
+        position: 'aboveBar',
+        shape: 'circle',
+        color,
+        text: `${label} ${next.toFixed(1)}%`,
+      })
+    }
+
+    // Single unified handler for all metrics
+    const unsubMetrics = gateway.onToken(mint, (data: TokenMetricsMessage) => {
+      recordPopoutWsDebug('token_metrics', data)
+
+      const updates: Partial<typeof popoutSignals> = {}
+
+      // Holders
+      if (typeof data.holders === 'number') {
+        updates.holders = data.holders
+      }
+
+      // Liquidity
+      if (typeof data.liquidityUsd === 'number') {
+        updates.liquidityUsd = data.liquidityUsd
+      }
+
+      // Top 10%
+      if (typeof data.top10Pct === 'number') {
+        updates.top10Pct = data.top10Pct
+        maybeMarkCross('Top10', lastTop10, data.top10Pct, 40, 'rgba(248,81,73,0.95)')
+        lastTop10 = data.top10Pct
+      }
+
+      // Dev%
+      if (typeof data.devPct === 'number') {
+        updates.devPct = data.devPct
+        maybeMarkCross('Dev', lastDev, data.devPct, 5, 'rgba(248,81,73,0.95)')
+        lastDev = data.devPct
+      }
+
+      // Sniper%
+      if (typeof data.sniperPct === 'number') {
+        updates.sniperPct = data.sniperPct
+        maybeMarkCross('Snipers', lastSniper, data.sniperPct, 20, 'rgba(234,179,8,0.95)')
+        lastSniper = data.sniperPct
+      }
+
+      // Insider%
+      if (typeof data.insiderPct === 'number') {
+        updates.insiderPct = data.insiderPct
+        maybeMarkCross('Insiders', lastInsider, data.insiderPct, 10, 'rgba(234,179,8,0.95)')
+        lastInsider = data.insiderPct
+      }
+
+      // Fees
+      if (typeof data.feesUsd === 'number') {
+        updates.feesUsd = data.feesUsd
+      }
+
+      // Curve%
+      if (typeof data.curvePct === 'number') {
+        updates.curvePct = data.curvePct
+        const crossed = (typeof lastCurve !== 'number' || lastCurve < 90) && data.curvePct >= 90
+        if (crossed) {
+          pushPopoutMarker(mint, {
+            time: Math.floor(Date.now() / 1000),
+            position: 'aboveBar',
+            shape: 'circle',
+            color: 'rgba(234,179,8,0.95)',
+            text: `Curve ${data.curvePct.toFixed(0)}%`,
+          })
+        }
+        lastCurve = data.curvePct
+      }
+
+      // Transaction/volume metrics
+      if (typeof data.tx5m === 'number') {
+        updates.tx5m = data.tx5m
+      }
+      if (typeof data.vol5mUsd === 'number') {
+        updates.vol5mUsd = data.vol5mUsd
+      }
+
+      // Primary pool
+      if (typeof data.primaryPoolId === 'string' && data.primaryPoolId) {
+        const prevPool = popoutPoolIdRef.current
+        if (prevPool !== data.primaryPoolId) {
+          popoutPoolIdRef.current = data.primaryPoolId
+          updates.primaryPoolId = data.primaryPoolId
+          pushPopoutMarker(mint, {
+            time: Math.floor(Date.now() / 1000),
+            position: 'aboveBar',
+            shape: 'square',
+            color: 'rgba(45,226,230,0.9)',
+            text: 'Pool rotated',
+          })
+        }
+      }
+
+      // Graduating/graduated
+      if (data.graduating) {
+        updates.graduating = true
+        pushPopoutMarker(mint, {
+          time: Math.floor(Date.now() / 1000),
+          position: 'aboveBar',
+          shape: 'circle',
+          color: 'rgba(234,179,8,0.95)',
+          text: 'GRADUATING',
+        })
+      }
+      if (data.graduated) {
+        updates.graduated = true
+        updates.graduating = false
+        pushPopoutMarker(mint, {
+          time: Math.floor(Date.now() / 1000),
+          position: 'belowBar',
+          shape: 'circle',
+          color: 'rgba(34,197,94,0.95)',
+          text: 'GRADUATED',
+        })
+      }
+
+      // Update state with all metrics at once
+      if (Object.keys(updates).length > 0) {
+        setPopoutSignals((prev) => ({ ...prev, ...updates }))
+      }
+    })
+
+    return () => {
+      unsubGlobal()
+      unsubMetrics()
+      gateway.unsubscribe(mint)
+      popoutPoolIdRef.current = ''
+      setPopoutSignals({})
+    }
+  }, [activePopoutMint, pushPopoutMarker, recordPopoutWsDebug, dataGatewayUrl])
 
   useEffect(() => {
     const id = window.setInterval(() => setUiNow(Date.now()), 2000)
@@ -989,9 +1938,24 @@ function App() {
     const history = holdingsMcHistoryRef.current
     const keep = new Set<string>()
 
+    const getHoldingDisplayMc = (h: HoldingToken): { mc?: number; isProxy: boolean } => {
+      const hasFeedMc = typeof h.currentMc === 'number' && Number.isFinite(h.currentMc)
+      const feedFresh = typeof h.mcUpdatedAt === 'number' ? now - h.mcUpdatedAt < 20_000 : false
+      const feedMc = hasFeedMc ? h.currentMc : undefined
+
+      if (typeof feedMc === 'number' && feedFresh) return { mc: feedMc, isProxy: false }
+
+      if (useQuoteMcProxyWhenStale) {
+        const proxyMc = computeHoldingMcProxy(h)
+        if (typeof proxyMc === 'number') return { mc: proxyMc, isProxy: true }
+      }
+
+      return { mc: feedMc, isProxy: false }
+    }
+
     for (const h of holdings) {
       keep.add(h.mint)
-      const mc = typeof h.currentMc === 'number' && Number.isFinite(h.currentMc) ? h.currentMc : undefined
+      const { mc } = getHoldingDisplayMc(h)
       if (typeof mc !== 'number') continue
 
       const prev = history[h.mint] ?? []
@@ -1007,7 +1971,7 @@ function App() {
     for (const mint of Object.keys(history)) {
       if (!keep.has(mint)) delete history[mint]
     }
-  }, [holdings])
+  }, [holdings, useQuoteMcProxyWhenStale])
 
   // Track a lightweight MC history per watched token for sparklines (bounded).
   useEffect(() => {
@@ -1103,6 +2067,8 @@ function App() {
                   liquidityStatus: h.liquidityStatus ?? snap.liquidityStatus,
                   buyMc: h.buyMc ?? buyMc,
                   currentMc: snap.current ?? h.currentMc,
+                  mcUpdatedAt:
+                    typeof snap.current === 'number' && Number.isFinite(snap.current) ? Date.now() : h.mcUpdatedAt,
 
                   entryPriceProxyScaled: h.entryPriceProxyScaled ?? meta?.entryPriceProxyScaled,
                   lastPriceProxyScaled: h.lastPriceProxyScaled ?? meta?.lastPriceProxyScaled,
@@ -1123,6 +2089,7 @@ function App() {
             liquidityStatus: snap.liquidityStatus,
             buyMc,
             currentMc: snap.current,
+            mcUpdatedAt: typeof snap.current === 'number' && Number.isFinite(snap.current) ? Date.now() : undefined,
 
             entryPriceProxyScaled: meta?.entryPriceProxyScaled,
             lastPriceProxyScaled: meta?.lastPriceProxyScaled,
@@ -1156,6 +2123,8 @@ function App() {
 
   const removeHolding = useCallback((mint: string) => {
     setHoldings((prev) => prev.filter((h) => h.mint !== mint))
+    // Clear candle history when token is explicitly removed
+    delete candleHistoryRef.current[mint]
   }, [])
 
   useEffect(() => {
@@ -1263,6 +2232,7 @@ function App() {
   const [error, setError] = useState<string>('')
   const [snipePrompt, setSnipePrompt] = useState<string>('')
   const [txSig, setTxSig] = useState<string>('')
+  const [showPaidPlanHint, setShowPaidPlanHint] = useState<boolean>(false)
   const [sellStep, setSellStep] = useState<UiStep>('idle')
   const [sellMintInFlight, setSellMintInFlight] = useState<string>('')
   const [sellSig, setSellSig] = useState<string>('')
@@ -1504,7 +2474,7 @@ function App() {
     }
     const bal = await getSolBalanceLamports(connection, kp.publicKey)
     setBotWalletSolLamports(bal)
-  }, [connection, pushDebugEvent])
+  }, [connection])
 
   useEffect(() => {
     void refreshBotWalletBalance()
@@ -1678,8 +2648,30 @@ function App() {
       }
     }
 
+    // Bind async event handlers once per underlying WS instance.
+    if (wsRef.current && wsRef.current.isAuthed && wsEventsBoundToRef.current !== wsRef.current) {
+      try {
+        wsEventsUnsubRef.current?.()
+      } catch {
+        // ignore
+      }
+
+      wsEventsBoundToRef.current = wsRef.current
+      wsEventsUnsubRef.current = wsRef.current.onMessage((m) => {
+        const msg = m as Partial<OrderUpdateMsg | PositionUpdateMsg>
+        if (msg.type === 'position_update') {
+          void syncPositionsFromBackend('position_update')
+        }
+        if (msg.type === 'order_update') {
+          void syncPositionsFromBackend('order_update')
+        }
+      })
+
+      void syncPositionsFromBackend('ws_bind')
+    }
+
     return wsRef.current
-  }, [apiKey, authToken, publicKey, recordTradingApiError, signMessage, wsUrl])
+  }, [apiKey, authToken, publicKey, recordTradingApiError, signMessage, syncPositionsFromBackend, wsUrl])
 
   const autoAuthedWalletRef = useRef<string>('')
   const autoAuthInFlightRef = useRef(false)
@@ -1696,8 +2688,10 @@ function App() {
     const wallet = publicKey.toBase58()
     if (autoAuthInFlightRef.current) return
     if (autoAuthedWalletRef.current === wallet) return
+    if (wsAuthed) return // Already authenticated, don't re-trigger
     if (wsRef.current?.isOpen && wsRef.current?.isAuthed) {
       autoAuthedWalletRef.current = wallet
+      setWsAuthed(true)
       return
     }
 
@@ -1717,7 +2711,16 @@ function App() {
         autoAuthInFlightRef.current = false
       }
     })()
-  }, [connected, ensureWs, publicKey, recordTradingApiError, signMessage])
+  }, [connected, ensureWs, publicKey, recordTradingApiError, wsAuthed])
+
+  // Flash between "Token mint is required" and "Snipe faster with paid plan"
+  useEffect(() => {
+    if (tier !== 'free') return
+    const interval = setInterval(() => {
+      setShowPaidPlanHint(prev => !prev)
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [tier])
 
   const retryWalletAuth = useCallback(() => {
     if (!connected || !publicKey || !signMessage) {
@@ -2020,6 +3023,7 @@ function App() {
       prev.map((h) => {
         const snap = getFeedMcSnapshot(h.mint)
         const nextCurrent = snap.current ?? h.currentMc
+        const nextMcUpdatedAt = typeof snap.current === 'number' && Number.isFinite(snap.current) ? Date.now() : h.mcUpdatedAt
         const nextName = h.name ?? snap.name
         const nextSymbol = h.symbol ?? snap.symbol
         const nextIsRugged = h.isRugged ?? snap.isRugged
@@ -2027,6 +3031,7 @@ function App() {
 
         const changed =
           nextCurrent !== h.currentMc ||
+          nextMcUpdatedAt !== h.mcUpdatedAt ||
           nextName !== h.name ||
           nextSymbol !== h.symbol ||
           nextIsRugged !== h.isRugged ||
@@ -2036,6 +3041,7 @@ function App() {
         return {
           ...h,
           currentMc: nextCurrent,
+          mcUpdatedAt: nextMcUpdatedAt,
           name: nextName,
           symbol: nextSymbol,
           isRugged: nextIsRugged,
@@ -2170,6 +3176,8 @@ function App() {
 
   const removeWatchedToken = useCallback((mint: string) => {
     setWatched((prev) => prev.filter((t) => t.mint !== mint))
+    // Clear candle history when token is explicitly removed from watching
+    delete candleHistoryRef.current[mint]
   }, [])
 
   const pollQuotes = useCallback(async () => {
@@ -2229,6 +3237,28 @@ function App() {
     }, 5000)
     return () => clearInterval(id)
   }, [fetchDequanwFeed])
+
+  // Popup handlers
+  const openSnipePopup = useCallback((mint: string) => {
+    setTokenMint(mint)
+    setSnipeCardSide('snipe') // Reset to buy side
+    setSnipePopupVisible(true)
+  }, [])
+
+  const closeSnipePopup = useCallback(() => {
+    setSnipePopupVisible(false)
+  }, [])
+
+  // Handle ESC key to close popup
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && snipePopupVisible) {
+        closeSnipePopup()
+      }
+    }
+    window.addEventListener('keydown', handleEsc)
+    return () => window.removeEventListener('keydown', handleEsc)
+  }, [snipePopupVisible, closeSnipePopup])
 
   const clearSnipeForm = useCallback(() => {
     setError('')
@@ -2343,6 +3373,35 @@ function App() {
         throw new Error('Quote missing route.serializedQuote (server must include it for build_swap_tx)')
       }
 
+      // Phase 1 backend parity: when trading from the authenticated wallet,
+      // prefer the server order pipeline so confirmations + positions can be SSOT.
+      let orderId: string | null = null
+      const canUseServerOrderPipeline = Boolean(!sessionKp && !botKp && publicKey && traderPk && traderPk.equals(publicKey))
+      if (canUseServerOrderPipeline) {
+        try {
+          const created = await runWs((ws) =>
+            ws.request<CreateOrderResult>(
+              {
+                type: 'create_order',
+                params: {
+                  side: 'buy',
+                  mint: mint.toBase58(),
+                  idempotencyKey: randomIdempotencyKey(),
+                  userPubkey: traderPk.toBase58(),
+                },
+              },
+              (m): m is CreateOrderResult => m.type === 'create_order_result',
+              12_000,
+            ),
+          )
+          if (created.success && created.data?.orderId) {
+            orderId = created.data.orderId
+          }
+        } catch {
+          orderId = null
+        }
+      }
+
       setStep('building')
       const built = await runWs((ws) =>
         ws.request<BuildSwapTxResult>(
@@ -2354,6 +3413,7 @@ function App() {
                 provider: 'jupiter',
                 serializedQuote,
               },
+              ...(orderId ? { orderId } : {}),
               ...(sessionKp
                 ? {
                     wrapAndUnwrapSol: false,
@@ -2375,6 +3435,13 @@ function App() {
       const unsignedTx = deserializeTx(txBase64)
 
       const confirmInBackground = (signature: string, mintBase58: string, entryProxyScaled: bigint | null) => {
+        pushPopoutMarker(mintBase58, {
+          time: Math.floor(Date.now() / 1000),
+          position: 'belowBar',
+          shape: 'arrowUp',
+          color: 'rgba(34,197,94,0.95)',
+          text: 'MY BUY',
+        })
         setBgTx({ sig: signature, startedAt: Date.now(), status: 'confirming' })
         pushDebugEvent({ area: 'trade', level: 'info', message: 'Tx submitted (bg confirm)', detail: signature })
         void (async () => {
@@ -2499,15 +3566,45 @@ function App() {
       const signedTx = botKp ? signTxWithKeypair(unsignedTx, botKp) : await signTransaction!(unsignedTx)
 
       setStep('submitting')
-      const signature = await connection.sendRawTransaction(signedTx.serialize(), {
-        skipPreflight: false,
-        maxRetries: 3,
-      })
+      let signature = ''
+
+      // If we created an order, submit via WS so the server can do broadcast + SSOT confirmation.
+      if (orderId) {
+        try {
+          const signedTxBase64 = signedTx.serialize().toString('base64')
+          const submitted = await runWs((ws) =>
+            ws.request<SubmitSignedTxResult>(
+              {
+                type: 'submit_signed_tx',
+                params: {
+                  orderId,
+                  signedTxBase64,
+                },
+              },
+              (m): m is SubmitSignedTxResult => m.type === 'submit_signed_tx_result',
+              20_000,
+            ),
+          )
+          if (!submitted.success || !submitted.data?.signature) throw new Error('submit_signed_tx failed')
+          signature = submitted.data.signature
+        } catch {
+          signature = await connection.sendRawTransaction(signedTx.serialize(), {
+            skipPreflight: false,
+            maxRetries: 3,
+          })
+        }
+      } else {
+        signature = await connection.sendRawTransaction(signedTx.serialize(), {
+          skipPreflight: false,
+          maxRetries: 3,
+        })
+      }
       setTxSig(signature)
 
       // UX: treat signature receipt as immediate success, confirm asynchronously.
       setStep('idle')
       confirmInBackground(signature, mint.toBase58(), entryPriceProxyScaled)
+      void syncPositionsFromBackend('buy_submit')
     } catch (e) {
       setSnipePrompt('')
       recordTradingApiError(e)
@@ -2540,11 +3637,13 @@ function App() {
     signMessage,
     slippageBps,
     tier,
-    tokenMint,
     userRateLimitUntilMs,
     useBotWalletForTrades,
     useDelegateFastModeBuys,
     validateMint,
+    syncPositionsFromBackend,
+    pushDebugEvent,
+    pushPopoutMarker,
   ])
 
   const sell = useCallback(
@@ -2592,6 +3691,8 @@ function App() {
             {
               mint,
               soldAt: Date.now(),
+              name: holdingSnap.name,
+              symbol: holdingSnap.symbol,
               pct: 100,
               outcome: 'RUGGED',
               buyMc: holdingSnap.buyMc,
@@ -2664,6 +3765,33 @@ function App() {
           throw new Error('Quote missing route.serializedQuote (server must include it for build_swap_tx)')
         }
 
+        let orderId: string | null = null
+        const canUseServerOrderPipeline = Boolean(!botKp && publicKey && traderPk.equals(publicKey))
+        if (canUseServerOrderPipeline) {
+          try {
+            const created = await runWs((ws) =>
+              ws.request<CreateOrderResult>(
+                {
+                  type: 'create_order',
+                  params: {
+                    side: 'sell',
+                    mint,
+                    idempotencyKey: randomIdempotencyKey(),
+                    userPubkey: traderPk.toBase58(),
+                  },
+                },
+                (m): m is CreateOrderResult => m.type === 'create_order_result',
+                12_000,
+              ),
+            )
+            if (created.success && created.data?.orderId) {
+              orderId = created.data.orderId
+            }
+          } catch {
+            orderId = null
+          }
+        }
+
         setSellStep('building')
         pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell: building tx', detail: mint })
         const built = await runWs((ws) =>
@@ -2676,6 +3804,7 @@ function App() {
                   provider: 'jupiter',
                   serializedQuote,
                 },
+                ...(orderId ? { orderId } : {}),
               },
             },
             (m): m is BuildSwapTxResult => m.type === 'build_swap_tx_result',
@@ -2700,12 +3829,48 @@ function App() {
 
         setSellStep('sending')
         pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell: sending raw tx', detail: mint })
-        const sig = await connection.sendRawTransaction(signedTx.serialize(), {
-          skipPreflight: false,
-          maxRetries: 3,
-        })
+
+        let sig = ''
+        if (orderId) {
+          try {
+            const signedTxBase64 = signedTx.serialize().toString('base64')
+            const submitted = await runWs((ws) =>
+              ws.request<SubmitSignedTxResult>(
+                {
+                  type: 'submit_signed_tx',
+                  params: {
+                    orderId,
+                    signedTxBase64,
+                  },
+                },
+                (m): m is SubmitSignedTxResult => m.type === 'submit_signed_tx_result',
+                20_000,
+              ),
+            )
+            if (!submitted.success || !submitted.data?.signature) throw new Error('submit_signed_tx failed')
+            sig = submitted.data.signature
+          } catch {
+            sig = await connection.sendRawTransaction(signedTx.serialize(), {
+              skipPreflight: false,
+              maxRetries: 3,
+            })
+          }
+        } else {
+          sig = await connection.sendRawTransaction(signedTx.serialize(), {
+            skipPreflight: false,
+            maxRetries: 3,
+          })
+        }
         setSellSig(sig)
+        pushPopoutMarker(mint, {
+          time: Math.floor(Date.now() / 1000),
+          position: 'aboveBar',
+          shape: 'arrowDown',
+          color: 'rgba(239,68,68,0.95)',
+          text: 'MY SELL',
+        })
         pushDebugEvent({ area: 'trade', level: 'info', message: 'Sell tx sent', detail: sig })
+        void syncPositionsFromBackend('sell_submit')
 
         setSellStep('confirming')
         const status = await confirmSignatureWithFallback(connection, sig, {
@@ -2735,6 +3900,8 @@ function App() {
           {
             mint,
             soldAt: Date.now(),
+            name: holdingSnap?.name,
+            symbol: holdingSnap?.symbol,
             pct: pctClamped,
             outcome: 'SOLD',
             signature: sig,
@@ -2787,9 +3954,11 @@ function App() {
       setSoldTokens,
       signMessage,
       signTransaction,
+      pushPopoutMarker,
       slippageBps,
       tier,
       userRateLimitUntilMs,
+      syncPositionsFromBackend,
     ],
   )
 
@@ -2920,7 +4089,7 @@ function App() {
         error: e instanceof Error ? e.message : String(e || 'RPC probe failed'),
       })
     }
-  }, [connection])
+  }, [connection, pushDebugEvent])
 
   useEffect(() => {
     if (!debugOpen || !canOpenDebug) return
@@ -3054,13 +4223,7 @@ function App() {
 
           await ensureControlPlaneWalletSession()
 
-          let me
-          try {
-            me = await getAccountMe(controlPlaneBaseUrl)
-          } catch (e) {
-            // If Control Plane is unreachable/misconfigured, surface the error.
-            throw e
-          }
+          const me = await getAccountMe(controlPlaneBaseUrl)
 
           if (!me.account) {
             setPendingSubscribeTier(target)
@@ -3179,6 +4342,495 @@ function App() {
       setAccountBusy(false)
     }
   }, [accountChallengeId, accountCode, closeAccountModal, controlPlaneBaseUrl, pendingSubscribeTier, publicKey, signMessage, subscribeToTier])
+
+  const showHoldingsInLeftRail = holdings.length > 0
+  const showWatchingInLeftRail = watched.length > 0
+
+  const holdingsPanel = (
+    <section className="panel" style={{ flex: '0 0 auto', overflow: 'visible' }}>
+      <div
+        className="panelHead panelHeadClickable"
+        role="button"
+        tabIndex={0}
+        aria-expanded={holdingsOpen}
+        onClick={() => setHoldingsOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            setHoldingsOpen((v) => !v)
+          }
+        }}
+      >
+        <div className="panelHeadTop">
+          <div className="panelTitle">
+            Holdings
+            <HelpDot href={helpUrl('holdings-realtime-chart')} title="Holdings real-time chart" />
+            <HelpDot href={helpUrl('holdings-buy-mc-time')} title="Holdings buy MC + buy time" />
+          </div>
+          <div className="panelChevron">{holdingsOpen ? '▾' : '▸'}</div>
+        </div>
+        <div className="panelHint">Tracked buys + PnL%</div>
+      </div>
+
+      {holdingsOpen ? (
+        <>
+          <div style={{ paddingRight: '4px' }}>
+            {sellError ? (
+              <div className="error" style={{ marginBottom: '10px' }}>
+                Sell: {sellError}
+              </div>
+            ) : null}
+            {sellSig ? (
+              <div className="note" style={{ marginBottom: '10px' }}>
+                <a
+                  href={`https://solscan.io/tx/${sellSig}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                >
+                  View sell on Solscan
+                </a>
+              </div>
+            ) : null}
+
+            <div className="watchHeaderRow watchHeaderRowHoldings">
+              <div className="watchHeaderCell watchHeaderCellLeft">Token</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Buy Age</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Buy MC</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Current MC</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Chart</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">PnL%</div>
+              <div className="watchHeaderCell watchHeaderCellRight">Actions</div>
+            </div>
+
+            {holdings.length ? (
+              holdings.map((h) => {
+                const { mc: holdingMc, isProxy } = getHoldingDisplayMc(h)
+                const pnl = computeGrowthPct(h.buyMc, holdingMc)
+                const isHot = typeof pnl === 'number' && Number.isFinite(pnl) && pnl >= growthTriggerPct
+                const buyAgeMs = Date.now() - (typeof h.boughtAt === 'number' ? h.boughtAt : Date.now())
+                const sellingThis = sellMintInFlight === h.mint && sellStep !== 'idle'
+                const tokenLabel = (h.symbol || h.name || '').trim() || shortPk(h.mint)
+                const rugged = isTokenRugged(h)
+                const series = holdingsMcHistoryRef.current[h.mint] ?? []
+                const points = renderSparkline(series, 92, 26)
+                const trend = seriesTrend(series)
+                return (
+                  <div key={h.mint} className={isHot ? 'watchRow watchRowHoldings watchRowHot' : 'watchRow watchRowHoldings'}>
+                    <div className="watchRowHeat" />
+                    <div className="watchCell watchCellLeft" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                      <span
+                        className="watchTokenFlip"
+                        style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, cursor: 'pointer' }}
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(h.mint)
+                            setCopiedMint(h.mint)
+                            setTimeout(() => setCopiedMint(''), 2000)
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        title={`${h.mint} (click to copy)`}
+                      >
+                        <span className="watchTokenSymbol">{tokenLabel}</span>
+                        <span className="watchTokenAddr mono">{shortPk(h.mint)}</span>
+                      </span>
+                      {copiedMint === h.mint ? (
+                        <span
+                          className="tokenRowBadge"
+                          style={{
+                            background: 'rgba(0, 255, 163, 0.15)',
+                            borderColor: 'rgba(0, 255, 163, 0.35)',
+                            color: 'var(--neon-green)',
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                          }}
+                        >
+                          Copied
+                        </span>
+                      ) : null}
+                      <span
+                        className={
+                          rugged
+                            ? 'tokenRowBadge tokenRowBadgeRugged'
+                            : isHot
+                              ? 'tokenRowBadge tokenRowBadgeHot'
+                              : 'tokenRowBadge tokenRowBadgeTrack'
+                        }
+                      >
+                        {rugged ? 'RUGGED' : isHot ? 'HOT' : 'HOLD'}
+                      </span>
+                    </div>
+                    <div className="watchCell watchCellCenter mono" data-label="Buy Age" title={formatTs(h.boughtAt)}>
+                      {formatAgeShort(buyAgeMs)}
+                    </div>
+                    <div className="watchCell watchCellCenter mono" data-label="Buy MC">{formatUsd0(h.buyMc)}</div>
+                    <div className="watchCell watchCellCenter mono" data-label="Current MC">
+                      {isProxy ? `≈ ${formatUsd0(holdingMc)}` : formatUsd0(holdingMc)}
+                    </div>
+                    <div className="watchCell watchCellCenter" data-label="Chart">
+                      <button
+                        type="button"
+                        className="sparklineBtn"
+                        onClick={() => {
+                          setWatchDrawerMint('')
+                          setHoldingDrawerMint(h.mint)
+                        }}
+                        title="Open chart"
+                      >
+                        {points ? (
+                          <svg width="92" height="26" viewBox="0 0 92 26" preserveAspectRatio="none">
+                            <polyline
+                              points={points}
+                              fill="none"
+                              stroke={
+                                trend === 'up'
+                                  ? 'rgba(0,255,163,0.9)'
+                                  : trend === 'down'
+                                    ? 'rgba(248,81,73,0.9)'
+                                    : 'rgba(234,242,255,0.6)'
+                              }
+                              strokeWidth="2"
+                              strokeLinejoin="round"
+                              strokeLinecap="round"
+                            />
+                          </svg>
+                        ) : (
+                          <span className="sparklineEmpty">—</span>
+                        )}
+                      </button>
+                    </div>
+                    <div
+                      className={
+                        typeof pnl === 'number' && pnl > 0
+                          ? 'watchCell watchCellCenter mono pos'
+                          : typeof pnl === 'number' && pnl < 0
+                            ? 'watchCell watchCellCenter mono neg'
+                            : 'watchCell watchCellCenter mono'
+                      }
+                      data-label="PnL%"
+                    >
+                      {typeof pnl === 'number' && Number.isFinite(pnl) ? `${pnl.toFixed(2)}%` : '—'}
+                    </div>
+                    <div className="watchActions">
+                      <button
+                        className="ghost"
+                        onClick={async () => {
+                          if (rugged) {
+                            setSoldTokens((prev) => [
+                              {
+                                mint: h.mint,
+                                soldAt: Date.now(),
+                                pct: 100,
+                                outcome: 'RUGGED',
+                                buyMc: h.buyMc,
+                                sellMc: 0,
+                              },
+                              ...prev,
+                            ])
+                            removeHolding(h.mint)
+                            await refreshBalances().catch(() => {})
+                            await refreshBotWalletBalance().catch(() => {})
+                            setSellError('Token marked RUGGED — recorded as complete loss')
+                            setSnipeCardSide('sell')
+                            return
+                          }
+
+                          setSellMintInput(h.mint)
+                          setSellPct(100)
+                          setSnipeCardSide('sell')
+                          setSnipePopupVisible(true)
+                        }}
+                        disabled={step !== 'idle' || sellStep !== 'idle'}
+                      >
+                        {sellingThis ? `${sellStep}…` : 'Sell'}
+                      </button>
+                      <button className="ghost" onClick={() => removeHolding(h.mint)}>
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                )
+              })
+            ) : (
+              <div style={{ padding: '10px 4px', color: 'var(--muted)', fontSize: '12px' }}>No holdings yet.</div>
+            )}
+          </div>
+        </>
+      ) : null}
+    </section>
+  )
+
+  const watchingPanel = (
+    <section className="panel" style={{ flex: '0 0 auto', overflow: 'visible' }}>
+      <div
+        className="panelHead panelHeadClickable"
+        role="button"
+        tabIndex={0}
+        aria-expanded={watchingOpen}
+        onClick={() => setWatchingOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            setWatchingOpen((v) => !v)
+          }
+        }}
+      >
+        <div className="panelHeadTop">
+          <div className="panelTitle">
+            Watching
+            <HelpDot href={helpUrl('watchlist-growth-proxy')} title="Growth% from quote proxy" />
+          </div>
+          <div className="panelChevron">{watchingOpen ? '▾' : '▸'}</div>
+        </div>
+        <div className="panelHint">Track tokens from Live Feed or add your own</div>
+      </div>
+
+      {watchingOpen ? (
+        <>
+          <div
+            className="subPanelHead"
+            role="button"
+            tabIndex={0}
+            aria-expanded={watchingAddOpen}
+            onClick={() => setWatchingAddOpen((v) => !v)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                setWatchingAddOpen((v) => !v)
+              }
+            }}
+          >
+            <div className="subPanelTitle">ADD TOKEN BY ADDRESS</div>
+            <div className="panelChevron">{watchingAddOpen ? '▾' : '▸'}</div>
+          </div>
+
+          {watchingAddOpen ? (
+            <div className="row" style={{ marginTop: '10px' }}>
+              <label>Token mint</label>
+              <div className="inline">
+                <input
+                  value={watchMintInput}
+                  onChange={(e) => setWatchMintInput(e.target.value)}
+                  placeholder="Paste token mint…"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                />
+                <button className="primary" onClick={addWatchedToken} disabled={step !== 'idle'}>
+                  Watch
+                </button>
+              </div>
+              <div className="note">
+                Tier limit: {watched.length}/{gates.maxWatchedTokens}
+              </div>
+            </div>
+          ) : null}
+
+          <div
+            className="note"
+            style={{
+              marginTop: '8px',
+              marginBottom: '6px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              userSelect: 'none',
+            }}
+            title="Uses the quote proxy ratio to approximate market cap when the feed stops emitting MC for a mint"
+          >
+            <input
+              type="checkbox"
+              checked={useQuoteMcProxyWhenStale}
+              onChange={(e) => setUseQuoteMcProxyWhenStale(e.target.checked)}
+              aria-label="Show quote-based MC proxy when feed MC is stale"
+            />
+            <span>Show quote-based MC proxy when feed MC is stale</span>
+          </div>
+
+          <div style={{ paddingRight: '4px' }}>
+            <div className="watchHeaderRow watchHeaderRowWatching">
+              <div className="watchHeaderCell watchHeaderCellLeft">Token</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Age</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Entry MC</div>
+              <div
+                className="watchHeaderCell watchHeaderCellCenter"
+                title="Market cap updates only when dequanW provides an MC snapshot for this mint"
+              >
+                Current MC (feed)
+              </div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Chart</div>
+              <div className="watchHeaderCell watchHeaderCellCenter">Growth</div>
+              <div className="watchHeaderCell watchHeaderCellRight">Actions</div>
+            </div>
+
+            {watched.length ? (
+              watched.map((t) => {
+                const mcGrowth = computeGrowthPct(t.entryMc, t.currentMc)
+                const growth = typeof mcGrowth === 'number' ? mcGrowth : typeof t.growthPct === 'number' ? t.growthPct : 0
+                const isHot = Number.isFinite(growth) && growth >= growthTriggerPct
+                const tExtra = t as unknown as Record<string, unknown>
+                const isRuggedExtra = typeof tExtra.isRugged === 'boolean' ? tExtra.isRugged : null
+                const liqExtra =
+                  tExtra.liquidityStatus === 'active' ||
+                  tExtra.liquidityStatus === 'removed' ||
+                  tExtra.liquidityStatus === 'unknown'
+                    ? (tExtra.liquidityStatus as 'active' | 'removed' | 'unknown')
+                    : null
+
+                const ruggedLabel = isTokenRugged({
+                  error: t.error ?? null,
+                  isRugged: isRuggedExtra,
+                  liquidityStatus: liqExtra,
+                })
+                  ? 'RUGGED'
+                  : ''
+                const ageMs = Date.now() - (typeof t.addedAt === 'number' ? t.addedAt : Date.now())
+                const tokenLabel = (t.symbol || t.name || '').trim() || shortPk(t.mint)
+                const mcAgeMs = typeof t.mcUpdatedAt === 'number' ? Date.now() - t.mcUpdatedAt : null
+                const mcIsStale = typeof mcAgeMs === 'number' && mcAgeMs > 60_000
+                const quoteMcProxy = mcIsStale && useQuoteMcProxyWhenStale ? computeQuoteMcProxy(t) : undefined
+                const showQuoteProxy = typeof quoteMcProxy === 'number' && Number.isFinite(quoteMcProxy) && quoteMcProxy > 0
+                const series = watchingMcHistoryRef.current[t.mint] ?? []
+                const points = renderSparkline(series, 92, 26)
+                const trend = seriesTrend(series)
+                return (
+                  <div key={t.mint} className={isHot ? 'watchRow watchRowWatching watchRowHot' : 'watchRow watchRowWatching'}>
+                    <div className="watchRowHeat" />
+                    <div className="watchCell watchCellLeft" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                      <span
+                        className="watchTokenFlip"
+                        style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, cursor: 'pointer' }}
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(t.mint)
+                            setCopiedMint(t.mint)
+                            setTimeout(() => setCopiedMint(''), 2000)
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        title={`${t.mint} (click to copy)`}
+                      >
+                        <span className="watchTokenSymbol">{tokenLabel}</span>
+                        <span className="watchTokenAddr mono">{shortPk(t.mint)}</span>
+                      </span>
+                      {copiedMint === t.mint ? (
+                        <span
+                          className="tokenRowBadge"
+                          style={{
+                            background: 'rgba(0, 255, 163, 0.15)',
+                            borderColor: 'rgba(0, 255, 163, 0.35)',
+                            color: 'var(--neon-green)',
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                          }}
+                        >
+                          Copied!
+                        </span>
+                      ) : null}
+                      <span className={isHot ? 'tokenRowBadge tokenRowBadgeHot' : 'tokenRowBadge tokenRowBadgeTrack'}>
+                        {isHot ? 'HOT' : 'TRACK'}
+                      </span>
+                      {t.error ? (
+                        <span
+                          className={ruggedLabel ? 'tokenRowBadge tokenRowBadgeRugged' : 'tokenRowBadge tokenRowBadgeWarm'}
+                          title={t.error}
+                        >
+                          {ruggedLabel || 'ISSUE'}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="watchCell watchCellCenter mono" data-label="Age">{formatAgeShort(ageMs)}</div>
+                    <div className="watchCell watchCellCenter mono" data-label="Entry MC">{formatUsd0(t.entryMc)}</div>
+                    <div
+                      className={
+                        mcIsStale
+                          ? 'watchCell watchCellCenter mono tokenRowStale'
+                          : 'watchCell watchCellCenter mono'
+                      }
+                      data-label="Current MC (feed)"
+                      title={
+                        showQuoteProxy
+                          ? `Feed MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). Showing quote-based MC proxy instead.\n\nLast feed MC: ${formatUsd0(t.currentMc)}\nQuote MC proxy: ≈${formatUsd0(quoteMcProxy)}`
+                          : mcIsStale
+                            ? `MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). MC only updates when this mint appears in the dequanW feed snapshot.`
+                            : 'MC updates only when this mint appears in the dequanW feed snapshot.'
+                      }
+                    >
+                      {showQuoteProxy ? `≈ ${formatUsd0(quoteMcProxy)}` : formatUsd0(t.currentMc)}
+                      {mcIsStale ? <span className="tokenRowBadge tokenRowBadgeStale">STALE</span> : null}
+                    </div>
+                    <div className="watchCell watchCellCenter" data-label="Chart">
+                      <button
+                        type="button"
+                        className="sparklineBtn"
+                        onClick={() => {
+                          setHoldingDrawerMint('')
+                          setWatchDrawerMint(t.mint)
+                        }}
+                        title="Open chart"
+                      >
+                        {points ? (
+                          <svg width="92" height="26" viewBox="0 0 92 26" preserveAspectRatio="none">
+                            <polyline
+                              points={points}
+                              fill="none"
+                              stroke={
+                                trend === 'up'
+                                  ? 'rgba(0,255,163,0.9)'
+                                  : trend === 'down'
+                                    ? 'rgba(248,81,73,0.9)'
+                                    : 'rgba(234,242,255,0.6)'
+                              }
+                              strokeWidth="2"
+                              strokeLinejoin="round"
+                              strokeLinecap="round"
+                            />
+                          </svg>
+                        ) : (
+                          <span className="sparklineEmpty">—</span>
+                        )}
+                      </button>
+                    </div>
+                    <div
+                      className={
+                        Number.isFinite(growth) && growth > 0
+                          ? 'watchCell watchCellCenter mono pos'
+                          : Number.isFinite(growth) && growth < 0
+                            ? 'watchCell watchCellCenter mono neg'
+                            : 'watchCell watchCellCenter mono'
+                      }
+                      data-label="Growth"
+                    >
+                      {Number.isFinite(growth) ? `${Number(growth).toFixed(2)}%` : '—'}
+                    </div>
+                    <div className="watchActions">
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          openSnipePopup(t.mint)
+                        }}
+                        disabled={step !== 'idle'}
+                      >
+                        Snipe
+                      </button>
+                      <button className="ghost" onClick={() => removeWatchedToken(t.mint)}>
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                )
+              })
+            ) : (
+              <div style={{ padding: '10px 4px', color: 'var(--muted)', fontSize: '12px' }}>No watched tokens yet.</div>
+            )}
+          </div>
+        </>
+      ) : null}
+    </section>
+  )
 
   return (
     <div className="app">
@@ -3300,8 +4952,27 @@ function App() {
                   const h = holdings.find((x) => x.mint === holdingDrawerMint)
                   const series = holdingsMcHistoryRef.current[holdingDrawerMint] ?? []
                   const points = renderSparkline(series, 560, 160)
-                  const pnl = h ? computeGrowthPct(h.buyMc, h.currentMc) : undefined
+                  const display = h ? getHoldingDisplayMc(h) : { mc: undefined as number | undefined, isProxy: false }
+                  const pnl = h ? computeGrowthPct(h.buyMc, display.mc) : undefined
                   const tokenLabel = h ? ((h.symbol || h.name || '').trim() || shortPk(h.mint)) : shortPk(holdingDrawerMint)
+                  const showLiveCandles = activePopoutMint === holdingDrawerMint
+                  const candleStaleMs = popoutLastTickAt ? uiNow - popoutLastTickAt : null
+                  const showSignals = Boolean(solanaTrackerWsUrl) && showLiveCandles
+                  const rugged = h ? isTokenRugged(h) : false
+
+                  const fmtPct = (n: number | undefined) =>
+                    typeof n === 'number' && Number.isFinite(n) ? `${n.toFixed(2)}%` : '—'
+
+                  const fmtUsdShort = (n: number | undefined) => {
+                    if (typeof n !== 'number' || !Number.isFinite(n)) return '—'
+                    const abs = Math.abs(n)
+                    if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}m`
+                    if (abs >= 1_000) return `$${(n / 1_000).toFixed(1)}k`
+                    return `$${Math.round(n).toLocaleString()}`
+                  }
+
+                  const lifecycleLabel =
+                    popoutSignals.graduated ? 'GRADUATED' : popoutSignals.graduating ? 'GRADUATING' : '—'
 
                   return (
                     <>
@@ -3311,18 +4982,49 @@ function App() {
                           <span className="holdingDrawerMint mono" title={holdingDrawerMint}>
                             {shortPk(holdingDrawerMint)}
                           </span>
+                          {showLiveCandles ? (
+                            <span
+                              className="mono"
+                              style={{
+                                marginLeft: 10,
+                                fontSize: 11,
+                                opacity: 0.75,
+                                color:
+                                  typeof candleStaleMs === 'number' && candleStaleMs > 8000
+                                    ? 'rgba(248,81,73,0.95)'
+                                    : 'rgba(45,226,230,0.9)',
+                              }}
+                              title="Live 1s candles (SolanaTracker streams)."
+                            >
+                              1s candles{typeof candleStaleMs === 'number' ? (candleStaleMs > 8000 ? ' (stale)' : '') : ''}
+                            </span>
+                          ) : null}
                         </div>
+                        {rugged ? (
+                          <div style={{
+                            marginTop: '12px',
+                            padding: '10px 14px',
+                            background: 'rgba(248,81,73,0.1)',
+                            border: '1px solid rgba(248,81,73,0.3)',
+                            borderRadius: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px'
+                          }}>
+                            <span style={{ fontSize: '16px' }}>⚠️</span>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: 'rgba(248,81,73,0.95)', marginBottom: '2px' }}>RUGGED TOKEN</div>
+                              <div style={{ fontSize: '11px', color: 'var(--muted)' }}>This token has been flagged as rugged. Liquidity may have been removed or the token may be a scam.</div>
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="holdingDrawerActions">
                           <button
                             type="button"
                             className="secondary"
                             onClick={() => {
-                              setSnipeCardSide('snipe')
-                              setTokenMint(holdingDrawerMint)
-                              const panel = document.getElementById('snipe-panel')
-                              panel?.classList.add('animate-glitch-pulse')
-                              setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
-                              window.setTimeout(() => void buy(), 0)
+                              closeHoldingDrawer()
+                              openSnipePopup(holdingDrawerMint)
                             }}
                             disabled={step !== 'idle'}
                             title="Snipe this token"
@@ -3350,8 +5052,106 @@ function App() {
                         </div>
                       </div>
 
+                      {showSignals ? (
+                        <>
+                        <div className="popoutSignalsRow">
+                          <span className={typeof popoutSignals.top10Pct === 'number' && popoutSignals.top10Pct >= 40 ? 'popoutSignal popoutSignalBad' : 'popoutSignal'}>
+                            Top10: <span className="mono">{fmtPct(popoutSignals.top10Pct)}</span>
+                          </span>
+                          <span className={typeof popoutSignals.devPct === 'number' && popoutSignals.devPct >= 5 ? 'popoutSignal popoutSignalBad' : 'popoutSignal'}>
+                            Dev: <span className="mono">{fmtPct(popoutSignals.devPct)}</span>
+                          </span>
+                          <span className="popoutSignal">Snipers: <span className="mono">{fmtPct(popoutSignals.sniperPct)}</span></span>
+                          <span className="popoutSignal">Insiders: <span className="mono">{fmtPct(popoutSignals.insiderPct)}</span></span>
+                          <span className="popoutSignal">Curve: <span className="mono">{fmtPct(popoutSignals.curvePct)}</span></span>
+                          <span
+                            className="popoutSignal"
+                            style={{
+                              color: popoutSignals.graduated
+                                ? 'rgba(34,197,94,0.95)'
+                                : popoutSignals.graduating
+                                  ? 'rgba(234,179,8,0.95)'
+                                  : undefined,
+                            }}
+                          >
+                            Status: <span className="mono">{lifecycleLabel}</span>
+                          </span>
+                          <span className="popoutSignal">5m Vol: <span className="mono">{fmtUsdShort(popoutSignals.vol5mUsd)}</span></span>
+                          <span className="popoutSignal">5m Tx: <span className="mono">{typeof popoutSignals.tx5m === 'number' && Number.isFinite(popoutSignals.tx5m) ? Math.round(popoutSignals.tx5m).toLocaleString() : '—'}</span></span>
+                          <span className="popoutSignal">Fees: <span className="mono">{typeof popoutSignals.feesUsd === 'number' && Number.isFinite(popoutSignals.feesUsd) ? `$${Math.round(popoutSignals.feesUsd).toLocaleString()}` : '—'}</span></span>
+                        </div>
+                        </>
+                      ) : null}
+
+                      {showLiveCandles ? (
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                            <button
+                              type="button"
+                              className="secondary"
+                              style={{ padding: '2px 8px', fontSize: 11, lineHeight: 1.2 }}
+                              onClick={() => setPopoutWsDebugOpen((v) => !v)}
+                              title="Show last SolanaTracker WS payloads + detected room names"
+                            >
+                              {popoutWsDebugOpen ? 'Hide WS debug' : 'WS debug'}
+                            </button>
+                          </div>
+                          {popoutWsDebugOpen ? (
+                            <div
+                              style={{
+                                marginTop: 8,
+                                padding: '10px 12px',
+                                borderRadius: 10,
+                                background: 'rgba(0,0,0,0.35)',
+                                border: '1px solid rgba(255,255,255,0.08)',
+                                maxHeight: 220,
+                                overflow: 'auto',
+                                fontSize: 11,
+                                opacity: 0.95,
+                              }}
+                            >
+                              {showSignals ? (
+                                <div className="mono" style={{ marginBottom: 8, opacity: 0.9 }}>
+                                  tokenPrimary: {popoutWsRoomWinners.tokenPrimary || '—'}
+                                  <br />
+                                  tokenStats: {popoutWsRoomWinners.tokenStats || '—'}
+                                  <br />
+                                  poolStats: {popoutWsRoomWinners.poolStats || '—'}
+                                </div>
+                              ) : null}
+                              <pre className="mono" style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                {popoutWsDebugText || 'No messages captured yet.'}
+                              </pre>
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+
                       <div className="holdingDrawerChart">
-                        {points ? (
+                        {showLiveCandles ? (
+                          popoutCandles.length ? (
+                            <Suspense fallback={<div className="holdingDrawerEmpty">Loading chart…</div>}>
+                              <CandlesChartLazy 
+                                candles={popoutCandles} 
+                                markers={popoutMarkers} 
+                                height={Math.min(Math.max(window.innerHeight * 0.3, 220), 400)}
+                                currentMc={display.mc}
+                                priceToMcRatio={h && display.mc && popoutCandles.length > 0 ? display.mc / popoutCandles[popoutCandles.length - 1].close : undefined}
+                              />
+                            </Suspense>
+                          ) : popoutCandleError ? (
+                            popoutCandleError.includes('Connect wallet') ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', height: '220px', padding: '20px' }}>
+                                <div style={{ fontSize: '18px', fontWeight: '600', color: 'var(--text)', textAlign: 'center' }}>Connect Wallet for Live Candles</div>
+                                <div style={{ fontSize: '13px', color: 'var(--muted)', textAlign: 'center' }}>Click "Connect Wallet" in the header above to enable real-time 1-second candle charts</div>
+                              </div>
+                            ) : (
+                              <div className="holdingDrawerEmpty">{popoutCandleError}</div>
+                            )
+                          ) : (
+                            <div className="holdingDrawerEmpty">Loading live candles…</div>
+                          )
+                        ) : points ? (
                           <svg width="100%" height="160" viewBox="0 0 560 160" preserveAspectRatio="none">
                             <polyline
                               points={points}
@@ -3367,6 +5167,20 @@ function App() {
                         )}
                       </div>
 
+                      {popoutSolanaTrackerWarning ? (
+                        <div style={{ marginTop: '10px', fontSize: '11px', color: 'rgba(234,179,8,0.95)', textAlign: 'center' }}>
+                          {popoutSolanaTrackerWarning}
+                        </div>
+                      ) : tier === 'free' ? (
+                        <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)', textAlign: 'center' }}>
+                          Risk/edge signals are available in paid plans.
+                        </div>
+                      ) : !solanaTrackerWsUrl ? (
+                        <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)', textAlign: 'center' }}>
+                          Paid risk/edge signals are unavailable: SolanaTracker is not configured.
+                        </div>
+                      ) : null}
+
                       {h ? (
                         <div className="holdingDrawerGrid">
                           <div className="holdingDrawerStat">
@@ -3379,7 +5193,7 @@ function App() {
                           </div>
                           <div className="holdingDrawerStat">
                             <div className="k">Current MC</div>
-                            <div className="v mono">{formatUsd0(h.currentMc)}</div>
+                            <div className="v mono">{display.isProxy ? `≈ ${formatUsd0(display.mc)}` : formatUsd0(display.mc)}</div>
                           </div>
                           <div className="holdingDrawerStat">
                             <div className="k">PnL</div>
@@ -3426,11 +5240,28 @@ function App() {
                   const series = watchingMcHistoryRef.current[watchDrawerMint] ?? []
                   const points = renderSparkline(series, 560, 160)
                   const mcGrowth = t ? computeGrowthPct(t.entryMc, t.currentMc) : undefined
-                  const quoteGrowth = t && typeof t.growthPct === 'number' ? t.growthPct : undefined
                   const tokenLabel = t ? ((t.symbol || t.name || '').trim() || shortPk(t.mint)) : shortPk(watchDrawerMint)
                   const addedAt = typeof t?.addedAt === 'number' ? t.addedAt : null
                   const mcAgeMs = typeof t?.mcUpdatedAt === 'number' ? Date.now() - t!.mcUpdatedAt! : null
-                  const quoteMcProxy = t ? computeQuoteMcProxy(t) : undefined
+                  const showLiveCandles = activePopoutMint === watchDrawerMint
+                  const candleStaleMs = popoutLastTickAt ? uiNow - popoutLastTickAt : null
+                  const showSignals = Boolean(solanaTrackerWsUrl) && showLiveCandles
+                  const mcIsStale = typeof mcAgeMs === 'number' && mcAgeMs > 60_000
+                  const ruggedLabel = t?.error ? (t.error.toLowerCase().includes('rug') ? 'RUGGED' : null) : null
+
+                  const fmtPct = (n: number | undefined) =>
+                    typeof n === 'number' && Number.isFinite(n) ? `${n.toFixed(2)}%` : '—'
+
+                  const fmtUsdShort = (n: number | undefined) => {
+                    if (typeof n !== 'number' || !Number.isFinite(n)) return '—'
+                    const abs = Math.abs(n)
+                    if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}m`
+                    if (abs >= 1_000) return `$${(n / 1_000).toFixed(1)}k`
+                    return `$${Math.round(n).toLocaleString()}`
+                  }
+
+                  const lifecycleLabel =
+                    popoutSignals.graduated ? 'GRADUATED' : popoutSignals.graduating ? 'GRADUATING' : '—'
 
                   return (
                     <>
@@ -3440,31 +5271,60 @@ function App() {
                           <span className="holdingDrawerMint mono" title={watchDrawerMint}>
                             {shortPk(watchDrawerMint)}
                           </span>
+                          {showLiveCandles ? (
+                            <span
+                              className="mono"
+                              style={{
+                                marginLeft: 10,
+                                fontSize: 11,
+                                opacity: 0.75,
+                                color:
+                                  typeof candleStaleMs === 'number' && candleStaleMs > 8000
+                                    ? 'rgba(248,81,73,0.95)'
+                                    : 'rgba(45,226,230,0.9)',
+                              }}
+                              title="Live 1s candles (SolanaTracker streams)."
+                            >
+                              1s candles{typeof candleStaleMs === 'number' ? (candleStaleMs > 8000 ? ' (stale)' : '') : ''}
+                            </span>
+                          ) : null}
                         </div>
+                        {ruggedLabel ? (
+                          <div style={{
+                            marginTop: '12px',
+                            padding: '10px 14px',
+                            background: 'rgba(248,81,73,0.1)',
+                            border: '1px solid rgba(248,81,73,0.3)',
+                            borderRadius: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px'
+                          }}>
+                            <span style={{ fontSize: '16px' }}>⚠️</span>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: 'rgba(248,81,73,0.95)', marginBottom: '2px' }}>RUGGED TOKEN</div>
+                              <div style={{ fontSize: '11px', color: 'var(--muted)' }}>{t?.error || 'This token has been flagged as rugged.'}</div>
+                            </div>
+                          </div>
+                        ) : mcIsStale ? (
+                          <div style={{
+                            marginTop: '12px',
+                            padding: '10px 14px',
+                            background: 'rgba(234,179,8,0.1)',
+                            border: '1px solid rgba(234,179,8,0.3)',
+                            borderRadius: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px'
+                          }}>
+                            <span style={{ fontSize: '16px' }}>⚠️</span>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: 'rgba(234,179,8,0.95)', marginBottom: '2px' }}>STALE TOKEN - PROCEED WITH CAUTION</div>
+                              <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Market cap data is stale (last update {formatAgeShort(mcAgeMs!)} ago). Token may be dumping or inactive.</div>
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="holdingDrawerActions">
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() => {
-                              if (tier === 'free') {
-                                try {
-                                  window.alert('Faster sniping is available in paid plans.')
-                                } catch {
-                                  // ignore
-                                }
-                              }
-                              setSnipeCardSide('snipe')
-                              setTokenMint(watchDrawerMint)
-                              const panel = document.getElementById('snipe-panel')
-                              panel?.classList.add('animate-glitch-pulse')
-                              setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
-                              window.setTimeout(() => void buy(), 0)
-                            }}
-                            disabled={step !== 'idle'}
-                            title="Snipe this token"
-                          >
-                            Snipe
-                          </button>
                           <button
                             type="button"
                             className="secondary"
@@ -3486,8 +5346,108 @@ function App() {
                         </div>
                       </div>
 
+                      {showSignals ? (
+                        <>
+                        <div className="popoutSignalsRow">
+                          <span className="popoutSignal">Holders: <span className="mono">{typeof popoutSignals.holders === 'number' ? popoutSignals.holders.toLocaleString() : '—'}</span></span>
+                          <span className={typeof popoutSignals.top10Pct === 'number' && popoutSignals.top10Pct >= 40 ? 'popoutSignal popoutSignalBad' : 'popoutSignal'}>
+                            Top10: <span className="mono">{fmtPct(popoutSignals.top10Pct)}</span>
+                          </span>
+                          <span className={typeof popoutSignals.devPct === 'number' && popoutSignals.devPct >= 5 ? 'popoutSignal popoutSignalBad' : 'popoutSignal'}>
+                            Dev: <span className="mono">{fmtPct(popoutSignals.devPct)}</span>
+                          </span>
+                          <span className="popoutSignal">Snipers: <span className="mono">{fmtPct(popoutSignals.sniperPct)}</span></span>
+                          <span className="popoutSignal">Insiders: <span className="mono">{fmtPct(popoutSignals.insiderPct)}</span></span>
+                          <span className="popoutSignal">Curve: <span className="mono">{fmtPct(popoutSignals.curvePct)}</span></span>
+                          <span
+                            className="popoutSignal"
+                            style={{
+                              color: popoutSignals.graduated
+                                ? 'rgba(34,197,94,0.95)'
+                                : popoutSignals.graduating
+                                  ? 'rgba(234,179,8,0.95)'
+                                  : undefined,
+                            }}
+                          >
+                            Status: <span className="mono">{lifecycleLabel}</span>
+                          </span>
+                          <span className="popoutSignal">5m Vol: <span className="mono">{fmtUsdShort(popoutSignals.vol5mUsd)}</span></span>
+                          <span className="popoutSignal">5m Tx: <span className="mono">{typeof popoutSignals.tx5m === 'number' && Number.isFinite(popoutSignals.tx5m) ? Math.round(popoutSignals.tx5m).toLocaleString() : '—'}</span></span>
+                          <span className="popoutSignal">Liq: <span className="mono">{fmtUsdShort(popoutSignals.liquidityUsd)}</span></span>
+                          <span className="popoutSignal">Fees: <span className="mono">{typeof popoutSignals.feesUsd === 'number' && Number.isFinite(popoutSignals.feesUsd) ? `$${Math.round(popoutSignals.feesUsd).toLocaleString()}` : '—'}</span></span>
+                        </div>
+                        </>
+                      ) : null}
+
+                      {showLiveCandles ? (
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                            <button
+                              type="button"
+                              className="secondary"
+                              style={{ padding: '2px 8px', fontSize: 11, lineHeight: 1.2 }}
+                              onClick={() => setPopoutWsDebugOpen((v) => !v)}
+                              title="Show last SolanaTracker WS payloads + detected room names"
+                            >
+                              {popoutWsDebugOpen ? 'Hide WS debug' : 'WS debug'}
+                            </button>
+                          </div>
+                          {popoutWsDebugOpen ? (
+                            <div
+                              style={{
+                                marginTop: 8,
+                                padding: '10px 12px',
+                                borderRadius: 10,
+                                background: 'rgba(0,0,0,0.35)',
+                                border: '1px solid rgba(255,255,255,0.08)',
+                                maxHeight: 220,
+                                overflow: 'auto',
+                                fontSize: 11,
+                                opacity: 0.95,
+                              }}
+                            >
+                              {showSignals ? (
+                                <div className="mono" style={{ marginBottom: 8, opacity: 0.9 }}>
+                                  tokenPrimary: {popoutWsRoomWinners.tokenPrimary || '—'}
+                                  <br />
+                                  tokenStats: {popoutWsRoomWinners.tokenStats || '—'}
+                                  <br />
+                                  poolStats: {popoutWsRoomWinners.poolStats || '—'}
+                                </div>
+                              ) : null}
+                              <pre className="mono" style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                {popoutWsDebugText || 'No messages captured yet.'}
+                              </pre>
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+
                       <div className="holdingDrawerChart">
-                        {points ? (
+                        {showLiveCandles ? (
+                          popoutCandles.length ? (
+                            <Suspense fallback={<div className="holdingDrawerEmpty">Loading chart…</div>}>
+                              <CandlesChartLazy 
+                                candles={popoutCandles} 
+                                markers={popoutMarkers} 
+                                height={220}
+                                currentMc={t?.currentMc}
+                                priceToMcRatio={t && t.currentMc && popoutCandles.length > 0 ? t.currentMc / popoutCandles[popoutCandles.length - 1].close : undefined}
+                              />
+                            </Suspense>
+                          ) : (
+                            popoutCandleError && popoutCandleError.includes('Connect wallet') ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', height: '220px', padding: '20px' }}>
+                                <div style={{ fontSize: '18px', fontWeight: '600', color: 'var(--text)', textAlign: 'center' }}>Connect Wallet for Live Candles</div>
+                                <div style={{ fontSize: '13px', color: 'var(--muted)', textAlign: 'center' }}>Return to main window and click "Connect Wallet" in the header to enable real-time candle charts</div>
+                              </div>
+                            ) : (
+                              <div className="holdingDrawerEmpty">
+                                {popoutCandleError ? popoutCandleError : 'Loading live candles…'}
+                              </div>
+                            )
+                          )
+                        ) : points ? (
                           <svg width="100%" height="160" viewBox="0 0 560 160" preserveAspectRatio="none">
                             <polyline
                               points={points}
@@ -3505,6 +5465,34 @@ function App() {
 
                       <div className="holdingDrawerGrid">
                         <div className="holdingDrawerStat">
+                          <div className="k">MC</div>
+                          <div className="v mono">{formatUsd0(t?.currentMc)}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">Liquidity</div>
+                          <div className="v mono">{fmtUsdShort(popoutSignals.liquidityUsd)}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">Holders</div>
+                          <div className="v mono">{typeof popoutSignals.holders === 'number' ? popoutSignals.holders.toLocaleString() : '—'}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">TPS (5m avg)</div>
+                          <div className="v mono" title="Transactions per second (5-minute average)">
+                            {typeof popoutSignals.tx5m === 'number' && Number.isFinite(popoutSignals.tx5m) ? (popoutSignals.tx5m / 300).toFixed(2) : '—'}
+                          </div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">Entry MC</div>
+                          <div className="v mono">{formatUsd0(t?.entryMc)}</div>
+                        </div>
+                        <div className="holdingDrawerStat">
+                          <div className="k">MC growth</div>
+                          <div className={typeof mcGrowth === 'number' && mcGrowth > 0 ? 'v mono pos' : typeof mcGrowth === 'number' && mcGrowth < 0 ? 'v mono neg' : 'v mono'}>
+                            {typeof mcGrowth === 'number' && Number.isFinite(mcGrowth) ? `${mcGrowth.toFixed(2)}%` : '—'}
+                          </div>
+                        </div>
+                        <div className="holdingDrawerStat">
                           <div className="k">Watch age</div>
                           <div className="v mono">{addedAt ? formatAgeShort(Date.now() - addedAt) : '—'}</div>
                         </div>
@@ -3514,40 +5502,53 @@ function App() {
                             {typeof mcAgeMs === 'number' ? `${formatAgeShort(mcAgeMs)} ago` : '—'}
                           </div>
                         </div>
-                        <div className="holdingDrawerStat">
-                          <div className="k">Entry MC</div>
-                          <div className="v mono">{formatUsd0(t?.entryMc)}</div>
-                        </div>
-                        <div className="holdingDrawerStat">
-                          <div className="k">Current MC (feed)</div>
-                          <div className="v mono">{formatUsd0(t?.currentMc)}</div>
-                        </div>
-                        <div className="holdingDrawerStat">
-                          <div className="k">MC proxy (quote)</div>
-                          <div
-                            className="v mono"
-                            title="Approx MC computed from quote proxy ratio (not from dequanW / DEXTools). Use as a direction signal only."
+                        <div className="holdingDrawerStat" style={{ gridColumn: 'span 2' }}>
+                          <button
+                            type="button"
+                            className="primary"
+                            style={{
+                              width: '100%',
+                              padding: '12px 20px',
+                              fontSize: '14px',
+                              fontWeight: '700',
+                              background: 'linear-gradient(135deg, rgba(57,211,83,0.95), rgba(34,197,94,0.95))',
+                              border: 'none',
+                              borderRadius: '10px',
+                              color: '#fff',
+                              cursor: step === 'idle' ? 'pointer' : 'not-allowed',
+                              opacity: step === 'idle' ? 1 : 0.5,
+                              transition: 'all 0.2s ease',
+                              boxShadow: step === 'idle' ? '0 2px 8px rgba(57,211,83,0.3)' : 'none'
+                            }}
+                            onClick={() => {
+                              closeWatchDrawer()
+                              openSnipePopup(watchDrawerMint)
+                            }}
+                            disabled={step !== 'idle'}
+                            title="Snipe this token"
+                            onMouseEnter={(e) => {
+                              if (step === 'idle') {
+                                e.currentTarget.style.transform = 'translateY(-1px)'
+                                e.currentTarget.style.boxShadow = '0 4px 12px rgba(57,211,83,0.4)'
+                              }
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.transform = 'translateY(0)'
+                              e.currentTarget.style.boxShadow = step === 'idle' ? '0 2px 8px rgba(57,211,83,0.3)' : 'none'
+                            }}
                           >
-                            {typeof quoteMcProxy === 'number' && Number.isFinite(quoteMcProxy) ? `≈${formatUsd0(quoteMcProxy)}` : '—'}
-                          </div>
-                        </div>
-                        <div className="holdingDrawerStat">
-                          <div className="k">MC growth</div>
-                          <div className={typeof mcGrowth === 'number' && mcGrowth > 0 ? 'v mono pos' : typeof mcGrowth === 'number' && mcGrowth < 0 ? 'v mono neg' : 'v mono'}>
-                            {typeof mcGrowth === 'number' && Number.isFinite(mcGrowth) ? `${mcGrowth.toFixed(2)}%` : '—'}
-                          </div>
-                        </div>
-                        <div className="holdingDrawerStat">
-                          <div className="k">Quote growth</div>
-                          <div className={typeof quoteGrowth === 'number' && quoteGrowth > 0 ? 'v mono pos' : typeof quoteGrowth === 'number' && quoteGrowth < 0 ? 'v mono neg' : 'v mono'}>
-                            {typeof quoteGrowth === 'number' && Number.isFinite(quoteGrowth) ? `${quoteGrowth.toFixed(2)}%` : '—'}
-                          </div>
+                            Snipe
+                          </button>
                         </div>
                       </div>
 
                       {tier === 'free' ? (
                         <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)', textAlign: 'center' }}>
-                          1s Live Candle Chart available in paid plans
+                          Risk/edge signals are available in paid plans.
+                        </div>
+                      ) : !solanaTrackerWsUrl ? (
+                        <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)', textAlign: 'center' }}>
+                          Paid risk/edge signals are unavailable: SolanaTracker is not configured.
                         </div>
                       ) : null}
                     </>
@@ -3657,943 +5658,15 @@ function App() {
       </div>
 
         <main id="minimalist-view" className="minimalistView">
-          {/* LEFT 65%: WATCHING (TOP) + LIVE FEED (BOTTOM) */}
+          {/* LEFT 65%: WATCHING (TOP) */}
           <div className="leftRail">
-            <section className="panel" style={{ flex: '0 0 auto', overflow: 'visible' }}>
-              <div
-                className="panelHead panelHeadClickable"
-                role="button"
-                tabIndex={0}
-                aria-expanded={holdingsOpen}
-                onClick={() => setHoldingsOpen((v) => !v)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setHoldingsOpen((v) => !v)
-                  }
-                }}
-              >
-                <div className="panelHeadTop">
-                  <div className="panelTitle">
-                    Holdings
-                    <HelpDot href={helpUrl('holdings-realtime-chart')} title="Holdings real-time chart" />
-                    <HelpDot href={helpUrl('holdings-buy-mc-time')} title="Holdings buy MC + buy time" />
-                  </div>
-                  <div className="panelChevron">{holdingsOpen ? '▾' : '▸'}</div>
-                </div>
-                <div className="panelHint">Tracked buys + PnL%</div>
-              </div>
-
-              {holdingsOpen ? (
-                <>
-                  <div style={{ paddingRight: '4px' }}>
-                    {sellError ? (
-                      <div className="error" style={{ marginBottom: '10px' }}>
-                        Sell: {sellError}
-                      </div>
-                    ) : null}
-                    {sellSig ? (
-                      <div className="note" style={{ marginBottom: '10px' }}>
-                        <a
-                          href={`https://solscan.io/tx/${sellSig}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-                        >
-                          View sell on Solscan
-                        </a>
-                      </div>
-                    ) : null}
-
-                    <div className="watchHeaderRow watchHeaderRowHoldings">
-                      <div className="watchHeaderCell watchHeaderCellLeft">Token</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Buy Age</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Buy MC</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Current MC</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Chart</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">PnL%</div>
-                      <div className="watchHeaderCell watchHeaderCellRight">Actions</div>
-                    </div>
-
-                    {holdings.length ? (
-                      holdings.map((h) => {
-                        const pnl = computeGrowthPct(h.buyMc, h.currentMc)
-                        const isHot = typeof pnl === 'number' && Number.isFinite(pnl) && pnl >= growthTriggerPct
-                        const buyAgeMs = Date.now() - (typeof h.boughtAt === 'number' ? h.boughtAt : Date.now())
-                        const sellingThis = sellMintInFlight === h.mint && sellStep !== 'idle'
-                        const tokenLabel = (h.symbol || h.name || '').trim() || shortPk(h.mint)
-                        const rugged = isTokenRugged(h)
-                        const series = holdingsMcHistoryRef.current[h.mint] ?? []
-                        const points = renderSparkline(series, 92, 26)
-                        const trend = seriesTrend(series)
-                        return (
-                          <div key={h.mint} className={isHot ? 'watchRow watchRowHoldings watchRowHot' : 'watchRow watchRowHoldings'}>
-                            <div className="watchRowHeat" />
-                            <div className="watchCell watchCellLeft" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                              <span
-                                className="watchTokenFlip"
-                                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, cursor: 'pointer' }}
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(h.mint)
-                                    setCopiedMint(h.mint)
-                                    setTimeout(() => setCopiedMint(''), 2000)
-                                  } catch {
-                                    // ignore
-                                  }
-                                }}
-                                title={`${h.mint} (click to copy)`}
-                              >
-                                <span className="watchTokenSymbol">{tokenLabel}</span>
-                                <span className="watchTokenAddr mono">{shortPk(h.mint)}</span>
-                              </span>
-                              {copiedMint === h.mint ? (
-                                <span
-                                  className="tokenRowBadge"
-                                  style={{
-                                    background: 'rgba(0, 255, 163, 0.15)',
-                                    borderColor: 'rgba(0, 255, 163, 0.35)',
-                                    color: 'var(--neon-green)',
-                                    fontSize: '10px',
-                                    padding: '2px 6px',
-                                  }}
-                                >
-                                  Copied
-                                </span>
-                              ) : null}
-                              <span
-                                className={
-                                  rugged
-                                    ? 'tokenRowBadge tokenRowBadgeRugged'
-                                    : isHot
-                                      ? 'tokenRowBadge tokenRowBadgeHot'
-                                      : 'tokenRowBadge tokenRowBadgeTrack'
-                                }
-                              >
-                                {rugged ? 'RUGGED' : isHot ? 'HOT' : 'HOLD'}
-                              </span>
-                            </div>
-                            <div className="watchCell watchCellCenter mono" data-label="Buy Age" title={formatTs(h.boughtAt)}>
-                              {formatAgeShort(buyAgeMs)}
-                            </div>
-                            <div className="watchCell watchCellCenter mono" data-label="Buy MC">{formatUsd0(h.buyMc)}</div>
-                            <div className="watchCell watchCellCenter mono" data-label="Current MC">{formatUsd0(h.currentMc)}</div>
-                            <div className="watchCell watchCellCenter" data-label="Chart">
-                              <button
-                                type="button"
-                                className="sparklineBtn"
-                                onClick={() => {
-                                  setWatchDrawerMint('')
-                                  setHoldingDrawerMint(h.mint)
-                                }}
-                                title="Open chart"
-                              >
-                                {points ? (
-                                  <svg width="92" height="26" viewBox="0 0 92 26" preserveAspectRatio="none">
-                                    <polyline
-                                      points={points}
-                                      fill="none"
-                                      stroke={
-                                        trend === 'up'
-                                          ? 'rgba(0,255,163,0.9)'
-                                          : trend === 'down'
-                                            ? 'rgba(248,81,73,0.9)'
-                                            : 'rgba(234,242,255,0.6)'
-                                      }
-                                      strokeWidth="2"
-                                      strokeLinejoin="round"
-                                      strokeLinecap="round"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <span className="sparklineEmpty">—</span>
-                                )}
-                              </button>
-                            </div>
-                            <div
-                              className={
-                                typeof pnl === 'number' && pnl > 0
-                                  ? 'watchCell watchCellCenter mono pos'
-                                  : typeof pnl === 'number' && pnl < 0
-                                    ? 'watchCell watchCellCenter mono neg'
-                                    : 'watchCell watchCellCenter mono'
-                              }
-                              data-label="PnL%"
-                            >
-                              {typeof pnl === 'number' && Number.isFinite(pnl) ? `${pnl.toFixed(2)}%` : '—'}
-                            </div>
-                            <div className="watchActions">
-                              <button
-                                className="ghost"
-                                onClick={async () => {
-                                  if (rugged) {
-                                    setSoldTokens((prev) => [
-                                      {
-                                        mint: h.mint,
-                                        soldAt: Date.now(),
-                                        pct: 100,
-                                        outcome: 'RUGGED',
-                                        buyMc: h.buyMc,
-                                        sellMc: 0,
-                                      },
-                                      ...prev,
-                                    ])
-                                    removeHolding(h.mint)
-                                    await refreshBalances().catch(() => {})
-                                    await refreshBotWalletBalance().catch(() => {})
-                                    setSellError('Token marked RUGGED — recorded as complete loss')
-                                    setSnipeCardSide('sell')
-                                    return
-                                  }
-
-                                  setSnipeCardSide('sell')
-                                  setSellMintInput(h.mint)
-                                  setSellPct(100)
-                                  const panel = document.getElementById('snipe-panel')
-                                  panel?.classList.add('animate-glitch-pulse')
-                                  setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
-                                }}
-                                disabled={step !== 'idle' || sellStep !== 'idle'}
-                              >
-                                {sellingThis ? `${sellStep}…` : 'Sell'}
-                              </button>
-                              <button className="ghost" onClick={() => removeHolding(h.mint)}>
-                                Remove
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })
-                    ) : (
-                      <div style={{ padding: '10px 4px', color: 'var(--muted)', fontSize: '12px' }}>No holdings yet.</div>
-                    )}
-                  </div>
-                </>
-              ) : null}
-            </section>
-
-            <section className="panel" style={{ flex: '0 0 auto', overflow: 'visible' }}>
-              <div
-                className="panelHead panelHeadClickable"
-                role="button"
-                tabIndex={0}
-                aria-expanded={watchingOpen}
-                onClick={() => setWatchingOpen((v) => !v)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setWatchingOpen((v) => !v)
-                  }
-                }}
-              >
-                <div className="panelHeadTop">
-                  <div className="panelTitle">
-                    Watching
-                    <HelpDot href={helpUrl('watchlist-growth-proxy')} title="Growth% from quote proxy" />
-                  </div>
-                  <div className="panelChevron">{watchingOpen ? '▾' : '▸'}</div>
-                </div>
-                <div className="panelHint">Track tokens from Live Feed or add your own</div>
-              </div>
-
-              {watchingOpen ? (
-                <>
-                  <div
-                    className="subPanelHead"
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={watchingAddOpen}
-                    onClick={() => setWatchingAddOpen((v) => !v)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        setWatchingAddOpen((v) => !v)
-                      }
-                    }}
-                  >
-                    <div className="subPanelTitle">ADD TOKEN BY ADDRESS</div>
-                    <div className="panelChevron">{watchingAddOpen ? '▾' : '▸'}</div>
-                  </div>
-
-                  {watchingAddOpen ? (
-                    <div className="row" style={{ marginTop: '10px' }}>
-                      <label>Token mint</label>
-                      <div className="inline">
-                        <input
-                          value={watchMintInput}
-                          onChange={(e) => setWatchMintInput(e.target.value)}
-                          placeholder="Paste token mint…"
-                          spellCheck={false}
-                          autoCapitalize="none"
-                          autoCorrect="off"
-                        />
-                        <button className="primary" onClick={addWatchedToken} disabled={step !== 'idle'}>
-                          Watch
-                        </button>
-                      </div>
-                      <div className="note">
-                        Tier limit: {watched.length}/{gates.maxWatchedTokens}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <div
-                    className="note"
-                    style={{
-                      marginTop: '8px',
-                      marginBottom: '6px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      userSelect: 'none',
-                    }}
-                    title="Uses the quote proxy ratio to approximate market cap when the feed stops emitting MC for a mint"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={useQuoteMcProxyWhenStale}
-                      onChange={(e) => setUseQuoteMcProxyWhenStale(e.target.checked)}
-                      aria-label="Show quote-based MC proxy when feed MC is stale"
-                    />
-                    <span>Show quote-based MC proxy when feed MC is stale</span>
-                  </div>
-
-                  <div style={{ paddingRight: '4px' }}>
-                    <div className="watchHeaderRow watchHeaderRowWatching">
-                      <div className="watchHeaderCell watchHeaderCellLeft">Token</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Age</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Entry MC</div>
-                      <div
-                        className="watchHeaderCell watchHeaderCellCenter"
-                        title="Market cap updates only when dequanW provides an MC snapshot for this mint"
-                      >
-                        Current MC (feed)
-                      </div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Chart</div>
-                      <div className="watchHeaderCell watchHeaderCellCenter">Growth</div>
-                      <div className="watchHeaderCell watchHeaderCellRight">Actions</div>
-                    </div>
-
-                    {watched.length ? (
-                      watched.map((t) => {
-                        const mcGrowth = computeGrowthPct(t.entryMc, t.currentMc)
-                        const growth = typeof mcGrowth === 'number' ? mcGrowth : typeof t.growthPct === 'number' ? t.growthPct : 0
-                        const isHot = Number.isFinite(growth) && growth >= growthTriggerPct
-                        const ruggedLabel = isTokenRugged({ error: t.error ?? null, isRugged: (t as any).isRugged ?? null, liquidityStatus: (t as any).liquidityStatus ?? null }) ? 'RUGGED' : ''
-                        const ageMs = Date.now() - (typeof t.addedAt === 'number' ? t.addedAt : Date.now())
-                        const tokenLabel = (t.symbol || t.name || '').trim() || shortPk(t.mint)
-                        const mcAgeMs = typeof t.mcUpdatedAt === 'number' ? Date.now() - t.mcUpdatedAt : null
-                        const mcIsStale = typeof mcAgeMs === 'number' && mcAgeMs > 60_000
-                        const quoteMcProxy = mcIsStale && useQuoteMcProxyWhenStale ? computeQuoteMcProxy(t) : undefined
-                        const showQuoteProxy = typeof quoteMcProxy === 'number' && Number.isFinite(quoteMcProxy) && quoteMcProxy > 0
-                        const series = watchingMcHistoryRef.current[t.mint] ?? []
-                        const points = renderSparkline(series, 92, 26)
-                        const trend = seriesTrend(series)
-                        return (
-                          <div key={t.mint} className={isHot ? 'watchRow watchRowWatching watchRowHot' : 'watchRow watchRowWatching'}>
-                            <div className="watchRowHeat" />
-                            <div className="watchCell watchCellLeft" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                              <span
-                                className="watchTokenFlip"
-                                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, cursor: 'pointer' }}
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(t.mint)
-                                    setCopiedMint(t.mint)
-                                    setTimeout(() => setCopiedMint(''), 2000)
-                                  } catch {
-                                    // Fallback: ignore if clipboard API fails
-                                  }
-                                }}
-                                title={`${t.mint} (click to copy)`}
-                              >
-                                <span className="watchTokenSymbol">
-                                  {tokenLabel}
-                                </span>
-                                <span className="watchTokenAddr mono">{shortPk(t.mint)}</span>
-                              </span>
-                              {copiedMint === t.mint ? (
-                                <span
-                                  className="tokenRowBadge"
-                                  style={{
-                                    background: 'rgba(0, 255, 163, 0.15)',
-                                    borderColor: 'rgba(0, 255, 163, 0.35)',
-                                    color: 'var(--neon-green)',
-                                    fontSize: '10px',
-                                    padding: '2px 6px',
-                                  }}
-                                >
-                                  Copied!
-                                </span>
-                              ) : null}
-                              <span className={isHot ? 'tokenRowBadge tokenRowBadgeHot' : 'tokenRowBadge tokenRowBadgeTrack'}>
-                                {isHot ? 'HOT' : 'TRACK'}
-                              </span>
-                              {t.error ? (
-                                <span
-                                  className={
-                                    ruggedLabel
-                                      ? 'tokenRowBadge tokenRowBadgeRugged'
-                                      : 'tokenRowBadge tokenRowBadgeWarm'
-                                  }
-                                  title={t.error}
-                                >
-                                  {ruggedLabel || 'ISSUE'}
-                                </span>
-                              ) : null}
-                            </div>
-                            <div className="watchCell watchCellCenter mono" data-label="Age">{formatAgeShort(ageMs)}</div>
-                            <div className="watchCell watchCellCenter mono" data-label="Entry MC">{formatUsd0(t.entryMc)}</div>
-                            <div
-                              className="watchCell watchCellCenter mono"
-                              data-label="Current MC (feed)"
-                              title={
-                                showQuoteProxy
-                                  ? `Feed MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). Showing quote-based MC proxy instead.\n\nLast feed MC: ${formatUsd0(t.currentMc)}\nQuote MC proxy: ≈${formatUsd0(quoteMcProxy)}`
-                                  : mcIsStale
-                                    ? `MC looks stale (last snapshot ${formatAgeShort(mcAgeMs!)} ago). MC only updates when this mint appears in the dequanW feed snapshot.`
-                                    : 'MC updates only when this mint appears in the dequanW feed snapshot.'
-                              }
-                              style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
-                            >
-                              <span>{showQuoteProxy ? `≈${formatUsd0(quoteMcProxy)}` : formatUsd0(t.currentMc)}</span>
-                              {showQuoteProxy ? (
-                                <span className="tokenRowBadge tokenRowBadgeProxy">PROXY</span>
-                              ) : mcIsStale ? (
-                                <span className="tokenRowBadge tokenRowBadgeWarm">STALE</span>
-                              ) : null}
-                            </div>
-                            <div className="watchCell watchCellCenter" data-label="Chart">
-                              <button
-                                type="button"
-                                className="sparklineBtn"
-                                onClick={() => {
-                                  setHoldingDrawerMint('')
-                                  setWatchDrawerMint(t.mint)
-                                }}
-                                title="Open chart (MC points update ~5s when snapshots are available)"
-                              >
-                                {points ? (
-                                  <svg width="92" height="26" viewBox="0 0 92 26" preserveAspectRatio="none">
-                                    <polyline
-                                      points={points}
-                                      fill="none"
-                                      stroke={
-                                        trend === 'up'
-                                          ? 'rgba(0,255,163,0.9)'
-                                          : trend === 'down'
-                                            ? 'rgba(248,81,73,0.9)'
-                                            : 'rgba(234,242,255,0.6)'
-                                      }
-                                      strokeWidth="2"
-                                      strokeLinejoin="round"
-                                      strokeLinecap="round"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <span className="sparklineEmpty">—</span>
-                                )}
-                              </button>
-                            </div>
-                            <div
-                              className={
-                                typeof growth === 'number' && growth > 0
-                                  ? 'watchCell watchCellCenter mono pos'
-                                  : typeof growth === 'number' && growth < 0
-                                    ? 'watchCell watchCellCenter mono neg'
-                                    : 'watchCell watchCellCenter mono'
-                              }
-                              data-label="Growth"
-                            >
-                              {Number.isFinite(growth) ? `${growth.toFixed(2)}%` : '—'}
-                            </div>
-                            <div className="watchActions">
-                              <button
-                                className="ghost"
-                                onClick={() => {
-                                  if (ruggedLabel) {
-                                    const confirmed = window.confirm(
-                                      `This token appears to be rugged (no liquidity route found).\n\nAre you sure you want to continue?\n\nMint: ${t.mint}`
-                                    )
-                                    if (!confirmed) return
-                                  }
-                                  setTokenMint(t.mint)
-                                  const panel = document.getElementById('snipe-panel')
-                                  panel?.classList.add('animate-glitch-pulse')
-                                  setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
-                                  void buy()
-                                }}
-                                disabled={step !== 'idle'}
-                              >
-                                Snipe
-                              </button>
-                              <button className="ghost" onClick={() => removeWatchedToken(t.mint)}>
-                                Remove
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })
-                    ) : (
-                      <div style={{ padding: '10px 4px', color: 'var(--muted)', fontSize: '12px' }}>No watched tokens yet.</div>
-                    )}
-                  </div>
-                </>
-              ) : null}
-            </section>
-
-            <section
-              className="panel"
-              style={{ flex: '0 0 auto', overflow: 'visible', display: 'flex', flexDirection: 'column' }}
-            >
-              <div
-                className="panelHead panelHeadClickable"
-                role="button"
-                tabIndex={0}
-                aria-expanded={liveFeedOpen}
-                onClick={() => setLiveFeedOpen((v) => !v)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setLiveFeedOpen((v) => !v)
-                  }
-                }}
-              >
-                <div className="panelHeadTop">
-                  <div className="panelTitle" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    Live Feed
-                    <span
-                      aria-label={feedError ? 'Feed error' : 'Feed healthy'}
-                      title={feedError ? 'Feed error' : 'Feed healthy'}
-                      style={{
-                        width: '8px',
-                        height: '8px',
-                        borderRadius: '999px',
-                        background: feedError ? 'rgba(248,81,73,0.95)' : 'rgba(46,208,110,0.95)',
-                        boxShadow: feedError ? '0 0 10px rgba(248,81,73,0.35)' : '0 0 10px rgba(46,208,110,0.25)',
-                        flex: '0 0 auto',
-                      }}
-                    />
-                  </div>
-                  <div className="panelChevron">{liveFeedOpen ? '▾' : '▸'}</div>
-                </div>
-                <div className="panelHint">Auto-refreshing kinetic stream from dequanW</div>
-                {feedLooksStale && !feedError ? (
-                  <div className="panelHint" style={{ color: 'var(--warn)', marginTop: '2px' }}>
-                    Feed looks stale (newest token {typeof feedNewestAgeMs === 'number' ? formatAgeShort(feedNewestAgeMs) : '—'} ago)
-                  </div>
-                ) : null}
-              </div>
-
-              {liveFeedOpen ? (
-                <>
-                  {/* THE STREAM CONTAINER */}
-                  <div style={{ paddingRight: '4px', position: 'relative' }}>
-                    <div className="scanning-line" />
-
-                    <div className="feedHeaderRow">
-                      <div className="feedHeaderCell">Token</div>
-                      <div className="feedHeaderCell">Market Cap</div>
-                      <div className="feedHeaderCell">MC Δ</div>
-                      <div className="feedHeaderCell" style={{ textAlign: 'right' }}>Actions</div>
-                    </div>
-
-                    <AnimatePresence mode="popLayout">
-                      {feed.slice(0, gates.liveFeedLimit).map((t) => (
-                        <TokenRow
-                          key={t.mint}
-                          token={t}
-                          onLoad={(mint) => {
-                            setTokenMint(mint)
-                            void refreshBalances()
-                          }}
-                          onWatch={watchMint}
-                          onSnipe={(mint) => {
-                            setTokenMint(mint)
-                            // Trigger snipe panel pulse
-                            const panel = document.getElementById('snipe-panel')
-                            panel?.classList.add('animate-glitch-pulse')
-                            setTimeout(() => panel?.classList.remove('animate-glitch-pulse'), 500)
-                            void buy()
-                          }}
-                          disabled={step !== 'idle'}
-                        />
-                      ))}
-                    </AnimatePresence>
-
-                    {/* EMPTY STATE */}
-                    {!feed.length ? (
-                      <div
-                        style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          height: '300px',
-                          opacity: 0.6,
-                        }}
-                      >
-                        <div
-                          className="radar-sweep"
-                          style={{
-                            width: '60px',
-                            height: '60px',
-                            borderRadius: '50%',
-                            border: '2px solid var(--neon-green)',
-                            marginBottom: '16px',
-                          }}
-                        />
-                        <div style={{ fontSize: '14px', color: 'var(--muted)' }}>Scanning for Signals...</div>
-                      </div>
-                    ) : null}
-                  </div>
-                </>
-              ) : null}
-            </section>
+            {showHoldingsInLeftRail ? holdingsPanel : null}
+            {showWatchingInLeftRail ? watchingPanel : null}
           </div>
 
           {/* RIGHT 35%: THE COMMAND CENTER (Fixed Sidebar) */}
           <aside className="commandCenter">
-            {/* SNIPE PANEL */}
-            <section id="snipe-panel" className="panel">
-              <div className={`flipCard ${snipeCardSide === 'sell' ? 'isFlipped' : ''}`}>
-                <div className="flipCardInner">
-                  <div className="flipCardFace flipCardFront">
-                    <div className="panelHead">
-                      <div className="panelTitle">
-                        <button
-                          type="button"
-                          className="panelTitleButton panelHeadClickable"
-                          onClick={() => setSnipeCardSide('sell')}
-                          title="Flip to Sell"
-                          aria-label="Flip to Sell"
-                        >
-                          Snipe
-                        </button>
-                        <HelpDot href={helpUrl('submitted-vs-confirmed')} title="Submitted vs confirmed" />
-                        <HelpDot href={helpUrl('real-solana-ws-confirm')} title="Real Solana WS confirmations" />
-                      </div>
-                      <div className="panelHint">Quick execution</div>
-                    </div>
-
-                    <div className="row">
-                      <label>Token Mint</label>
-                      <input
-                        value={tokenMint}
-                        onChange={(e) => setTokenMint(e.target.value)}
-                        placeholder="Token mint address…"
-                        spellCheck={false}
-                        autoCapitalize="none"
-                        autoCorrect="off"
-                      />
-                    </div>
-
-                    <div className="row">
-                      <label>Amount (SOL)</label>
-                      <div className="inline">
-                        <input
-                          value={amountSol}
-                          onChange={(e) => setAmountSol(e.target.value)}
-                          inputMode="decimal"
-                          placeholder="0.01"
-                        />
-                        <div className="quick">
-                          <button className={amountSol === '0.01' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.01')}>
-                            0.01
-                          </button>
-                          <button className={amountSol === '0.05' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.05')}>
-                            0.05
-                          </button>
-                          <button className={amountSol === '0.1' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.1')}>
-                            0.1
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="row">
-                      <label>Slippage (bps)</label>
-                      <div className="inline">
-                        <input
-                          value={String(slippageBps)}
-                          onChange={(e) => setSlippageBps(Number(e.target.value))}
-                          inputMode="numeric"
-                          placeholder="4000"
-                        />
-                      </div>
-                    </div>
-
-                    {gates.allowLiveTrading ? (
-                      <div className="row" style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-                        <div className="note" style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                          Fee breakdown ({(() => {
-                            const bps = gates.tradeFeeBps ?? 100
-                            return `${(bps / 100).toFixed(2)}% protocol fee`
-                          })()})
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
-                          <span className="muted">Trade amount</span>
-                          <span className="mono">{amountSol} SOL</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
-                          <span className="muted">Fee ({(() => {
-                            const bps = gates.tradeFeeBps ?? 100
-                            return `${(bps / 100).toFixed(2)}%`
-                          })()})</span>
-                          <span className="mono">{(() => {
-                            const amt = Number(amountSol || 0)
-                            const bps = gates.tradeFeeBps ?? 100
-                            const feeRate = bps / 10000
-                            return Number.isFinite(amt) && amt > 0 ? (amt * feeRate).toFixed(6) : '0.000000'
-                          })()} SOL</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                          <span>Total required</span>
-                          <span className="mono">{(() => {
-                            const amt = Number(amountSol || 0)
-                            const bps = gates.tradeFeeBps ?? 100
-                            const feeRate = bps / 10000
-                            return Number.isFinite(amt) && amt > 0 ? (amt * (1 + feeRate)).toFixed(6) : '0.000000'
-                          })()} SOL</span>
-                        </div>
-                      </div>
-                    ) : null}
-
-                    <div className="ctaRow">
-                      <button className="primary" onClick={buy} disabled={step !== 'idle'} style={{ flex: 1 }}>
-                        {step === 'idle' ? 'Snipe' : step === 'done' ? 'Done' : `${step}…`}
-                      </button>
-                      <button className="secondary" onClick={clearSnipeForm} disabled={step !== 'idle'} type="button">
-                        Clear
-                      </button>
-                    </div>
-
-                    {snipePrompt && step === 'connecting' ? (
-                      <div className="note" style={{ marginTop: '10px', color: 'var(--muted)' }}>
-                        {snipePrompt}
-                      </div>
-                    ) : null}
-
-                    {uiError ? (
-                      <div className="error" title={uiErrorTitle || undefined}>
-                        {uiError}
-                      </div>
-                    ) : null}
-                    {txSig ? (
-                      <div className="note">
-                        <a
-                          href={`https://solscan.io/tx/${txSig}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-                        >
-                          View on Solscan
-                        </a>
-                      </div>
-                    ) : null}
-
-                    {bgTx && bgTx.sig === txSig ? (
-                      <div className="note" style={{ color: 'var(--muted)' }}>
-                        {bgTx.status === 'confirming'
-                          ? `Submitted (sig received) — confirming in background…`
-                          : bgTx.status === 'confirmed'
-                            ? 'Confirmed'
-                            : bgTx.status === 'not_found'
-                              ? 'Signature not found on chain — likely dropped (retry)'
-                              : bgTx.status === 'timeout'
-                                ? 'Still confirming — check Solscan'
-                                : bgTx.error
-                                  ? `Confirmation failed: ${bgTx.error}`
-                                  : 'Confirmation failed'}
-                      </div>
-                    ) : null}
-
-                    <div className="statusCompact">
-                      <div className="statusLine">
-                        <span className="muted">SOL Balance</span>
-                        <span className="mono">
-                          {!connected
-                            ? 'Connect wallet'
-                            : balanceLoading
-                              ? '…'
-                              : solBalanceLamports !== null
-                                ? (Number(solBalanceLamports) / 1e9).toFixed(4)
-                                : balanceError
-                                  ? 'RPC error'
-                                  : '—'}
-                        </span>
-                      </div>
-                      <div className="statusLine">
-                        <span className="muted">Token Balance</span>
-                        <span className="mono">
-                          {!connected
-                            ? '—'
-                            : balanceLoading
-                              ? '…'
-                              : tokenBalance !== null
-                                ? (Number(tokenBalance.amount) / Math.pow(10, tokenBalance.decimals)).toFixed(4)
-                                : balanceError
-                                  ? 'RPC error'
-                                  : '—'}
-                        </span>
-                      </div>
-                    </div>
-
-                    {connected && balanceError ? (
-                      <div className="note" style={{ color: 'var(--muted)' }}>
-                        Balance fetch issue: {balanceError}
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="flipCardFace flipCardBack">
-                    <div className="panelHead">
-                      <div className="panelTitle">Sell</div>
-                      <div className="panelHint">
-                        <button
-                          className="pillBtn"
-                          onClick={() => {
-                            setSnipeCardSide('snipe')
-                          }}
-                          type="button"
-                        >
-                          Return to Snipe
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="row">
-                      <label>Token Mint</label>
-                      <input
-                        value={sellMintInput}
-                        onChange={(e) => setSellMintInput(e.target.value.trim())}
-                        placeholder="Token mint address…"
-                        spellCheck={false}
-                        autoCapitalize="none"
-                        autoCorrect="off"
-                      />
-                    </div>
-
-                    <div className="row">
-                      <label>Sell %</label>
-                      <div className="inline">
-                        <div className="quick">
-                          <button className={sellPct === 25 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(25)} type="button">
-                            25%
-                          </button>
-                          <button className={sellPct === 50 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(50)} type="button">
-                            50%
-                          </button>
-                          <button className={sellPct === 100 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(100)} type="button">
-                            100%
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="ctaRow">
-                      <button
-                        className="primary danger"
-                        onClick={() => sell(sellMintInput, sellPct)}
-                        disabled={!sellMintInput || sellStep !== 'idle'}
-                        style={{ flex: 1 }}
-                      >
-                        {sellStep === 'idle' ? 'Sell' : `Selling… (${sellStep})`}
-                      </button>
-                      <button
-                        onClick={() => {
-                          setSellMintInput('')
-                          setSellPct(100)
-                        }}
-                        disabled={sellStep !== 'idle'}
-                        type="button"
-                      >
-                        Clear
-                      </button>
-                    </div>
-
-                    {sellError ? (
-                      <div className="error">
-                        {sellError}
-                      </div>
-                    ) : null}
-
-                    {sellSig ? (
-                      <div className="note">
-                        <a
-                          href={`https://solscan.io/tx/${sellSig}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-                        >
-                          View sell on Solscan
-                        </a>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            {snipeCardSide === 'sell' ? (
-              <section className="panel">
-                <div className="panelHead">
-                  <div className="panelTitle">Sold Tokens</div>
-                  <div className="panelHint">
-                    <button className="pillBtn" disabled={soldTokens.length === 0} onClick={() => setSoldTokens([])} type="button">
-                      Clear all
-                    </button>
-                  </div>
-                </div>
-                <div className="panelBody" style={{ paddingTop: 0 }}>
-                  {soldTokens.length === 0 ? (
-                    <div className="note" style={{ color: 'var(--text-muted)' }}>
-                      No sold tokens yet.
-                    </div>
-                  ) : (
-                    <div className="tableWrap" style={{ marginTop: 10 }}>
-                      <table className="table">
-                        <thead>
-                          <tr>
-                            <th>Mint</th>
-                                <th>%</th>
-                            <th>When</th>
-                            <th>Sig</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {soldTokens.map((t) => (
-                            <tr key={`${t.mint}-${t.soldAt}`}>
-                              <td className="mono" style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                {t.mint}
-                              </td>
-                                  <td className="mono">{typeof t.pct === 'number' ? `${Math.max(1, Math.min(100, Math.floor(t.pct)))}%` : '—'}</td>
-                              <td className="mono">{new Date(t.soldAt).toLocaleString()}</td>
-                              <td className="mono" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                {t.signature ? (
-                                  <a
-                                    href={`https://solscan.io/tx/${t.signature}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-                                  >
-                                    {t.signature}
-                                  </a>
-                                ) : t.outcome === 'RUGGED' ? (
-                                  <span className="tokenRowBadge tokenRowBadgeRugged">RUGGED</span>
-                                ) : (
-                                  ''
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </section>
-            ) : null}
+            {/* SNIPE PANEL removed - now appears as popup */}
 
             {gates.allowFastMode ? (
               <section className="panel">
@@ -4761,11 +5834,105 @@ function App() {
                   </>
                 )}
 
-                {botWalletError ? <div className="error">{botWalletError}</div> : null}
-              </section>
-            ) : null}
-          </aside>
+              {botWalletError ? <div className="error">{botWalletError}</div> : null}
+            </section>
+          ) : null}
+        </aside>
       </main>
+
+      {/* LIVE FEED - Full width section below main view */}
+      <section
+        className="panel liveFeedPanel"
+        style={{ flex: '0 0 auto', overflow: 'visible', display: 'flex', flexDirection: 'column', marginTop: '16px' }}
+      >
+        <div
+          className="panelHead panelHeadClickable"
+          role="button"
+          tabIndex={0}
+          aria-expanded={liveFeedOpen}
+          onClick={() => setLiveFeedOpen((v) => !v)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              setLiveFeedOpen((v) => !v)
+            }
+          }}
+        >
+          <div className="panelHeadTop">
+            <div className="panelTitle" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              Live Feed
+              <span
+                aria-label={feedError ? 'Feed error' : 'Feed healthy'}
+                title={feedError ? 'Feed error' : 'Feed healthy'}
+                style={{
+                  width: '8px',
+                  height: '8px',
+                  borderRadius: '999px',
+                  background: feedError ? 'rgba(248,81,73,0.95)' : 'rgba(46,208,110,0.95)',
+                  boxShadow: feedError ? '0 0 10px rgba(248,81,73,0.35)' : '0 0 10px rgba(46,208,110,0.25)',
+                  flex: '0 0 auto',
+                }}
+              />
+            </div>
+            <div className="panelChevron">{liveFeedOpen ? '▾' : '▸'}</div>
+          </div>
+          <div className="panelHint">Auto-refreshing kinetic stream from dequanW</div>
+          {feedLooksStale && !feedError ? (
+            <div className="panelHint" style={{ color: 'var(--warn)', marginTop: '2px' }}>
+              Feed looks stale (newest token {typeof feedNewestAgeMs === 'number' ? formatAgeShort(feedNewestAgeMs) : '—'} ago)
+            </div>
+          ) : null}
+        </div>
+
+        {liveFeedOpen ? (
+          <>
+            {/* THE STREAM CONTAINER */}
+            <div style={{ paddingRight: '4px', position: 'relative' }}>
+              <div className="scanning-line" />
+
+              <div className="feedHeaderRow">
+                <div className="feedHeaderCell">Token</div>
+                <div className="feedHeaderCell">Market Cap</div>
+                <div className="feedHeaderCell">MC Δ</div>
+                <div className="feedHeaderCell" style={{ textAlign: 'right' }}>Actions</div>
+              </div>
+
+              <AnimatePresence mode="popLayout">
+                {feed.slice(0, gates.liveFeedLimit).map((t) => (
+                  <TokenRow
+                    key={t.mint}
+                    token={t}
+                    nowMs={uiNow}
+                    onLoad={(mint) => {
+                      setTokenMint(mint)
+                      void refreshBalances()
+                    }}
+                    onWatch={watchMint}
+                    onSnipe={openSnipePopup}
+                    disabled={step !== 'idle'}
+                  />
+                ))}
+              </AnimatePresence>
+
+              {/* EMPTY STATE */}
+              {!feed.length ? (
+                <div
+                  style={{
+                    padding: '60px 20px',
+                    textAlign: 'center',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: '16px',
+                  }}
+                >
+                  <div style={{ fontSize: '14px', color: 'var(--muted)' }}>Scanning for Signals...</div>
+                </div>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+      </section>
 
       {debugOpen ? (
         <div className="debugBackdrop" role="dialog" aria-modal="true">
@@ -5134,6 +6301,478 @@ function App() {
           </div>
         </div>
       ) : null}
+
+      {/* SNIPE POPUP OVERLAY */}
+      {snipePopupVisible ? (
+        <>
+          <div className="snipePopupBackdrop" onClick={closeSnipePopup} />
+          <div className={`snipePopupContainer ${snipeCardSide === 'snipe' ? 'buyGlow' : 'sellGlow'}`}>
+            <button className="snipePopupClose" onClick={closeSnipePopup} aria-label="Close">
+              ×
+            </button>
+
+            <section id="snipe-panel" className="panel">
+              <div className={`flipCard ${snipeCardSide === 'sell' ? 'isFlipped' : ''}`}>
+                <div className="flipCardSizer" style={typeof flipCardHeight === 'number' ? { height: `${flipCardHeight}px` } : undefined}>
+                  <div className="flipCardInner">
+                    <div className="flipCardFace flipCardFront" ref={flipFrontRef}>
+                    <div className="panelHead">
+                      <div className="panelTitle">
+                        <div
+                          className={`snipeSellSwitch ${snipeCardSide === 'snipe' ? 'isSnipe' : 'isSell'}`}
+                          role="group"
+                          aria-label="Snipe / Sell"
+                        >
+                          <button
+                            type="button"
+                            className={`snipeSellSwitchBtn snipe ${snipeCardSide === 'snipe' ? 'isActive' : 'isInactive'}`}
+                            onClick={() => {
+                              if (snipeCardSide !== 'snipe') setSnipeCardSide('snipe')
+                            }}
+                            aria-pressed={snipeCardSide === 'snipe'}
+                            disabled={snipeCardSide === 'snipe'}
+                            title={snipeCardSide === 'snipe' ? 'Snipe' : 'Flip to Snipe'}
+                          >
+                            Snipe
+                          </button>
+                          <button
+                            type="button"
+                            className={`snipeSellSwitchBtn sell ${snipeCardSide === 'sell' ? 'isActive' : 'isInactive'}`}
+                            onClick={() => {
+                              if (snipeCardSide !== 'sell') setSnipeCardSide('sell')
+                            }}
+                            aria-pressed={snipeCardSide === 'sell'}
+                            disabled={snipeCardSide === 'sell'}
+                            title={snipeCardSide === 'sell' ? 'Sell' : 'Flip to Sell'}
+                          >
+                            Sell
+                          </button>
+                        </div>
+                        <div className="snipeSellSwitchHelp">
+                          <HelpDot href={helpUrl('submitted-vs-confirmed')} title="Submitted vs confirmed" />
+                          <HelpDot href={helpUrl('real-solana-ws-confirm')} title="Real Solana WS confirmations" />
+                        </div>
+                      </div>
+                      <div className="panelHint">Quick execution</div>
+                    </div>
+
+                    <div className="row">
+                      <label>Token Mint</label>
+                      <input
+                        value={tokenMint}
+                        onChange={(e) => setTokenMint(e.target.value)}
+                        placeholder="Token mint address…"
+                        spellCheck={false}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                      />
+                    </div>
+
+                    <div className="row">
+                      <label>Amount (SOL)</label>
+                      <div className="inline">
+                        <input
+                          value={amountSol}
+                          onChange={(e) => setAmountSol(e.target.value)}
+                          inputMode="decimal"
+                          placeholder="0.01"
+                        />
+                        <div className="quick">
+                          <button className={amountSol === '0.01' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.01')}>
+                            0.01
+                          </button>
+                          <button className={amountSol === '0.05' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.05')}>
+                            0.05
+                          </button>
+                          <button className={amountSol === '0.1' ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setAmountSol('0.1')}>
+                            0.1
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="row">
+                      <label>Slippage (bps)</label>
+                      <div className="inline">
+                        <input
+                          value={String(slippageBps)}
+                          onChange={(e) => setSlippageBps(Number(e.target.value))}
+                          inputMode="numeric"
+                          placeholder="4000"
+                        />
+                      </div>
+                    </div>
+
+                    {gates.allowLiveTrading ? (
+                      <div className="row" style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+                        <div className="note" style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                          Fee breakdown ({(() => {
+                            const bps = gates.tradeFeeBps ?? 100
+                            return `${(bps / 100).toFixed(2)}% protocol fee`
+                          })()})
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
+                          <span className="muted">Trade amount</span>
+                          <span className="mono">{amountSol} SOL</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '2px' }}>
+                          <span className="muted">Fee ({(() => {
+                            const bps = gates.tradeFeeBps ?? 100
+                            return `${(bps / 100).toFixed(2)}%`
+                          })()})</span>
+                          <span className="mono">{(() => {
+                            const amt = Number(amountSol || 0)
+                            const bps = gates.tradeFeeBps ?? 100
+                            const feeRate = bps / 10000
+                            return Number.isFinite(amt) && amt > 0 ? (amt * feeRate).toFixed(6) : '0.000000'
+                          })()} SOL</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontWeight: 600, paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                          <span>Total required</span>
+                          <span className="mono">{(() => {
+                            const amt = Number(amountSol || 0)
+                            const bps = gates.tradeFeeBps ?? 100
+                            const feeRate = bps / 10000
+                            return Number.isFinite(amt) && amt > 0 ? (amt * (1 + feeRate)).toFixed(6) : '0.000000'
+                          })()} SOL</span>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="ctaRow">
+                      <button className="primary" onClick={buy} disabled={step !== 'idle'} style={{ flex: 1 }}>
+                        {step === 'idle' ? 'Snipe' : step === 'done' ? 'Done' : `${step}…`}
+                      </button>
+                      <button className="secondary" onClick={clearSnipeForm} disabled={step !== 'idle'} type="button">
+                        Clear
+                      </button>
+                    </div>
+
+                    {snipePrompt && step === 'connecting' ? (
+                      <div className="note" style={{ marginTop: '10px', color: 'var(--muted)' }}>
+                        {snipePrompt}
+                      </div>
+                    ) : null}
+
+                    {uiError ? (
+                      <div className="error" title={uiErrorTitle || undefined}>
+                        {uiError}
+                      </div>
+                    ) : tier === 'free' && !tokenMint.trim() ? (
+                      <div className="note" style={{ marginTop: '10px', color: 'var(--muted)', transition: 'opacity 0.3s' }}>
+                        {showPaidPlanHint ? 'Snipe faster with paid plan' : 'Token mint is required'}
+                      </div>
+                    ) : null}
+                    {txSig ? (
+                      <div className="note">
+                        <a
+                          href={`https://solscan.io/tx/${txSig}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >
+                          View on Solscan
+                        </a>
+                      </div>
+                    ) : null}
+
+                    {bgTx && bgTx.sig === txSig ? (
+                      <div className="note" style={{ color: 'var(--muted)' }}>
+                        {bgTx.status === 'confirming'
+                          ? `Submitted (sig received) — confirming in background…`
+                          : bgTx.status === 'confirmed'
+                            ? 'Confirmed'
+                            : bgTx.status === 'not_found'
+                              ? 'Signature not found on chain — likely dropped (retry)'
+                              : bgTx.status === 'timeout'
+                                ? 'Still confirming — check Solscan'
+                                : bgTx.error
+                                  ? `Confirmation failed: ${bgTx.error}`
+                                  : 'Confirmation failed'}
+                      </div>
+                    ) : null}
+
+                    <div className="statusCompact">
+                      <div className="statusLine">
+                        <span className="muted">SOL Balance</span>
+                        <span className="mono">
+                          {!connected
+                            ? 'Connect wallet'
+                            : balanceLoading
+                              ? '…'
+                              : solBalanceLamports !== null
+                                ? (Number(solBalanceLamports) / 1e9).toFixed(4)
+                                : balanceError
+                                  ? 'RPC error'
+                                  : '—'}
+                        </span>
+                      </div>
+                      <div className="statusLine">
+                        <span className="muted">Token Balance</span>
+                        <span className="mono">
+                          {!connected
+                            ? '—'
+                            : balanceLoading
+                              ? '…'
+                              : tokenBalance !== null
+                                ? (Number(tokenBalance.amount) / Math.pow(10, tokenBalance.decimals)).toFixed(4)
+                                : balanceError
+                                  ? 'RPC error'
+                                  : '—'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {connected && balanceError ? (
+                      <div className="note" style={{ color: 'var(--muted)' }}>
+                        Balance fetch issue: {balanceError}
+                      </div>
+                    ) : null}
+                  </div>
+
+                    <div className="flipCardFace flipCardBack" ref={flipBackRef}>
+                    <div className="panelHead">
+                      <div className="panelTitle">
+                        <div
+                          className={`snipeSellSwitch ${snipeCardSide === 'snipe' ? 'isSnipe' : 'isSell'}`}
+                          role="group"
+                          aria-label="Snipe / Sell"
+                        >
+                          <button
+                            type="button"
+                            className={`snipeSellSwitchBtn snipe ${snipeCardSide === 'snipe' ? 'isActive' : 'isInactive'}`}
+                            onClick={() => {
+                              if (snipeCardSide !== 'snipe') setSnipeCardSide('snipe')
+                            }}
+                            aria-pressed={snipeCardSide === 'snipe'}
+                            disabled={snipeCardSide === 'snipe'}
+                            title={snipeCardSide === 'snipe' ? 'Snipe' : 'Flip to Snipe'}
+                          >
+                            Snipe
+                          </button>
+                          <button
+                            type="button"
+                            className={`snipeSellSwitchBtn sell ${snipeCardSide === 'sell' ? 'isActive' : 'isInactive'}`}
+                            onClick={() => {
+                              if (snipeCardSide !== 'sell') setSnipeCardSide('sell')
+                            }}
+                            aria-pressed={snipeCardSide === 'sell'}
+                            disabled={snipeCardSide === 'sell'}
+                            title={snipeCardSide === 'sell' ? 'Sell' : 'Flip to Sell'}
+                          >
+                            Sell
+                          </button>
+                        </div>
+                        <div className="snipeSellSwitchHelp">
+                          <HelpDot href={helpUrl('submitted-vs-confirmed')} title="Submitted vs confirmed" />
+                          <HelpDot href={helpUrl('real-solana-ws-confirm')} title="Real Solana WS confirmations" />
+                        </div>
+                      </div>
+                      <div className="panelHint">Exit position</div>
+                    </div>
+
+                    <div className="row">
+                      <label>Token Mint</label>
+                      <input
+                        value={sellMintInput}
+                        onChange={(e) => setSellMintInput(e.target.value.trim())}
+                        placeholder="Token mint address…"
+                        spellCheck={false}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                      />
+                    </div>
+
+                    <div className="row">
+                      <label>Sell %</label>
+                      <div className="inline">
+                        <div className="quick">
+                          <button className={sellPct === 25 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(25)} type="button">
+                            25%
+                          </button>
+                          <button className={sellPct === 50 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(50)} type="button">
+                            50%
+                          </button>
+                          <button className={sellPct === 100 ? 'pillBtn pillBtnActive' : 'pillBtn'} onClick={() => setSellPct(100)} type="button">
+                            100%
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="ctaRow">
+                      <button
+                        className="primary danger"
+                        onClick={() => sell(sellMintInput, sellPct)}
+                        disabled={!sellMintInput || sellStep !== 'idle'}
+                        style={{ flex: 1 }}
+                      >
+                        {sellStep === 'idle' ? 'Sell' : `Selling… (${sellStep})`}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSellMintInput('')
+                          setSellPct(100)
+                        }}
+                        disabled={sellStep !== 'idle'}
+                        type="button"
+                      >
+                        Clear
+                      </button>
+                    </div>
+
+                    {sellError ? (
+                      <div className="error">
+                        {sellError}
+                      </div>
+                    ) : null}
+
+                    {sellSig ? (
+                      <div className="note">
+                        <a
+                          href={`https://solscan.io/tx/${sellSig}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >
+                          View sell on Solscan
+                        </a>
+                      </div>
+                    ) : null}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {snipeCardSide === 'sell' ? (
+              <section className="panel">
+                <div
+                  className="panelHead panelHeadClickable"
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={portfolioOpen}
+                  onClick={() => setPortfolioOpen((v) => !v)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      setPortfolioOpen((v) => !v)
+                    }
+                  }}
+                >
+                  <div className="panelHeadTop">
+                    <div className="panelTitle">Portfolio</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <button
+                        className="pillBtn"
+                        disabled={soldTokens.length === 0}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setSoldTokens([])
+                        }}
+                        type="button"
+                      >
+                        Clear all
+                      </button>
+                      <div className="panelChevron">{portfolioOpen ? '▾' : '▸'}</div>
+                    </div>
+                  </div>
+                  <div className="panelHint">Sold outcomes + history</div>
+                </div>
+
+                {portfolioOpen ? (
+                  <div className="panelBody" style={{ paddingTop: 0 }}>
+                    {soldTokens.length === 0 ? (
+                      <div className="note" style={{ color: 'var(--text-muted)' }}>
+                        No sold tokens yet.
+                      </div>
+                    ) : (
+                      <div className="tableWrap" style={{ marginTop: 10 }}>
+                        <table className="table">
+                          <thead>
+                            <tr>
+                              <th>Token</th>
+                              <th>%</th>
+                              <th>When</th>
+                              <th>Sig</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {soldTokens.map((t) => {
+                              const tokenLabel = (t.symbol || t.name || '').trim() || shortPk(t.mint)
+                              return (
+                                <tr key={`${t.mint}-${t.soldAt}`}>
+                                  <td style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    <span
+                                      className="watchTokenFlip"
+                                      style={{ cursor: 'pointer' }}
+                                      onClick={async () => {
+                                        try {
+                                          await navigator.clipboard.writeText(t.mint)
+                                          setCopiedMint(t.mint)
+                                          setTimeout(() => setCopiedMint(''), 2000)
+                                        } catch {
+                                          // ignore
+                                        }
+                                      }}
+                                      title={`${t.mint} (click to copy)`}
+                                    >
+                                      <span className="watchTokenSymbol">{tokenLabel}</span>
+                                      <span className="watchTokenAddr mono" style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                        {t.mint}
+                                      </span>
+                                    </span>
+                                    {copiedMint === t.mint ? (
+                                      <span
+                                        className="tokenRowBadge"
+                                        style={{
+                                          marginLeft: 8,
+                                          background: 'rgba(0, 255, 163, 0.15)',
+                                          borderColor: 'rgba(0, 255, 163, 0.35)',
+                                          color: 'var(--neon-green)',
+                                          fontSize: '10px',
+                                          padding: '2px 6px',
+                                        }}
+                                      >
+                                        Copied
+                                      </span>
+                                    ) : null}
+                                  </td>
+                                  <td className="mono">
+                                    {typeof t.pct === 'number' ? `${Math.max(1, Math.min(100, Math.floor(t.pct)))}%` : '—'}
+                                  </td>
+                                  <td className="mono">{new Date(t.soldAt).toLocaleString()}</td>
+                                  <td className="mono" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {t.signature ? (
+                                      <a
+                                        href={`https://solscan.io/tx/${t.signature}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                                      >
+                                        {t.signature}
+                                      </a>
+                                    ) : t.outcome === 'RUGGED' ? (
+                                      <span className="tokenRowBadge tokenRowBadgeRugged">RUGGED</span>
+                                    ) : (
+                                      ''
+                                    )}
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+          </div>
+        </>
+      ) : null}
+
         </>
       ) : null}
     </div>

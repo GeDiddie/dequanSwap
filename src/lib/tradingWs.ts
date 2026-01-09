@@ -38,6 +38,8 @@ export class TradingWs {
 
   private helloCache: AnyJson | null = null
 
+  private readonly messageListeners = new Set<(msg: AnyJson) => void>()
+
   private stats: TradingWsStats = { messageCount: 0, lastMessageAt: 0, lastMessageType: undefined }
   private statsListener: ((event: MessageEvent) => void) | null = null
 
@@ -73,6 +75,13 @@ export class TradingWs {
     return this.helloCache
   }
 
+  onMessage(listener: (msg: AnyJson) => void): () => void {
+    this.messageListeners.add(listener)
+    return () => {
+      this.messageListeners.delete(listener)
+    }
+  }
+
   async connect(): Promise<void> {
     if (this.isOpen) return
 
@@ -96,6 +105,16 @@ export class TradingWs {
         // before the auth-specific listener is attached.
         if (this.stats.lastMessageType === 'hello') {
           this.helloCache = parsed
+        }
+
+        if (this.messageListeners.size > 0) {
+          for (const fn of this.messageListeners) {
+            try {
+              fn(parsed)
+            } catch {
+              // ignore
+            }
+          }
         }
       } catch {
         // ignore
